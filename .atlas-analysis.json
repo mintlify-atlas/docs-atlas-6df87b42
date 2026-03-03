@@ -1,0 +1,124 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "MAPPA OS Simulator",
+  "projectDescription": "An operating system simulator implementing CPU, memory management, kernel scheduling, and filesystem with paging and resource management",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "architecture",
+              "setup"
+            ]
+          },
+          {
+            "group": "Core Components",
+            "pages": [
+              "components/cpu",
+              "components/memory",
+              "components/kernel",
+              "components/filesystem"
+            ]
+          },
+          {
+            "group": "System Design",
+            "pages": [
+              "design/memory-management",
+              "design/process-scheduling",
+              "design/file-management",
+              "design/inter-process-communication"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/cpu-config",
+              "configuration/memory-config",
+              "configuration/kernel-config",
+              "configuration/filesystem-config"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/testing",
+              "development/debugging"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "CPU",
+            "pages": [
+              "api/cpu/instructions",
+              "api/cpu/execution-cycle"
+            ]
+          },
+          {
+            "group": "Memory",
+            "pages": [
+              "api/memory/paging",
+              "api/memory/page-replacement"
+            ]
+          },
+          {
+            "group": "Kernel",
+            "pages": [
+              "api/kernel/scheduler",
+              "api/kernel/resources",
+              "api/kernel/console-commands"
+            ]
+          },
+          {
+            "group": "Filesystem",
+            "pages": [
+              "api/filesystem/fat",
+              "api/filesystem/blocks",
+              "api/filesystem/swap"
+            ]
+          },
+          {
+            "group": "Utils",
+            "pages": [
+              "api/utils/protocol",
+              "api/utils/sockets"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "CPU instruction execution with fetch-decode-execute cycle",
+    "Memory management with paging and page replacement algorithms (FIFO, LRU)",
+    "Process scheduling with multiple algorithms (FIFO, Round Robin, Priorities)",
+    "Filesystem with FAT implementation and swap space management",
+    "Inter-process communication using sockets and custom protocol",
+    "Resource management with deadlock detection",
+    "Configurable system parameters for each component"
+  ],
+  "publicApiSurface": [
+    "CPU: SET, SUM, SUB, MOV_IN, MOV_OUT, SLEEP, WAIT, SIGNAL, EXIT, JNZ instructions",
+    "CPU: F_OPEN, F_CLOSE, F_SEEK, F_READ, F_WRITE, F_TRUNCATE file operations",
+    "Memory: Page table management, TLB, page fault handling",
+    "Memory: FIFO and LRU page replacement algorithms",
+    "Kernel: INICIAR_PROCESO, FINALIZAR_PROCESO, DETENER_PLANIFICACION, INICIAR_PLANIFICACION",
+    "Kernel: MULTIPROGRAMACION, PROCESO_ESTADO console commands",
+    "Kernel: FIFO, Round Robin, and Priority scheduling algorithms",
+    "Filesystem: FAT operations, block allocation/deallocation",
+    "Filesystem: Swap space reservation and liberation",
+    "Utils: Socket-based communication protocol"
+  ]
+}
