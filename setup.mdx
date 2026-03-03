@@ -224,7 +224,7 @@ Each module needs a configuration file. Sample configurations are provided in ea
     PUERTO_ESCUCHA=8003
     PATH_FAT=./fs/fat.dat
     PATH_BLOQUES=./fs/bloques.dat
-    PATH_FCB=./fs/fcb
+    PATH_FCB=./fs/fcbs
     CANT_BLOQUES_TOTAL=1024
     CANT_BLOQUES_SWAP=256
     TAM_BLOQUE=16
@@ -263,7 +263,7 @@ Each line is one instruction. The CPU will execute them sequentially.
 ### Create Filesystem Directories
 
 ```bash
-mkdir -p filesystem/fs/fcb
+mkdir -p filesystem/fs/fcbs
 ```
 
 The Filesystem will create `fat.dat` and `bloques.dat` automatically on first run.
