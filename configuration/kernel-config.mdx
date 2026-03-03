@@ -1,0 +1,190 @@
+---
+title: 'Kernel Configuration'
+description: 'Configuration parameters for the Kernel module'
+---
+
+The Kernel module manages process scheduling, resource allocation, and coordinates communication between all system modules.
+
+## Configuration File
+
+The Kernel module reads its configuration from a `.config` file passed as a command-line argument:
+
+```bash
+./kernel kernel.config
+```
+
+## Configuration Parameters
+
+### Module Connection Parameters
+
+<ParamField path="IP_MEMORIA" type="string" required>
+  IP address of the Memory module.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_MEMORIA" type="integer" required>
+  Port number where the Memory module is listening.
+  
+  **Example:** `8002`
+</ParamField>
+
+<ParamField path="IP_CPU" type="string" required>
+  IP address of the CPU module.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_CPU_DISPATCH" type="integer" required>
+  Port number for CPU dispatch connections (sending PCBs).
+  
+  **Example:** `8006`
+</ParamField>
+
+<ParamField path="PUERTO_CPU_INTERRUPT" type="integer" required>
+  Port number for CPU interrupt connections (sending interruptions).
+  
+  **Example:** `8007`
+</ParamField>
+
+<ParamField path="IP_FILESYSTEM" type="string" required>
+  IP address of the Filesystem module.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_FILESYSTEM" type="integer" required>
+  Port number where the Filesystem module is listening.
+  
+  **Example:** `8003`
+</ParamField>
+
+### Scheduling Parameters
+
+<ParamField path="ALGORITMO_PLANIFICACION" type="string" required>
+  Short-term scheduling algorithm for process execution.
+  
+  **Valid values:**
+  - `FIFO` - First In First Out (non-preemptive)
+  - `RR` - Round Robin (preemptive with quantum)
+  - `PRIORIDADES` - Priority-based scheduling (preemptive)
+  
+  **Example:** `FIFO`
+</ParamField>
+
+<ParamField path="QUANTUM" type="integer">
+  Time quantum in milliseconds for Round Robin scheduling.
+  
+  Only used when ALGORITMO_PLANIFICACION is set to `RR`. Determines how long a process can execute before being preempted.
+  
+  **Example:** `2000` (2 seconds)
+</ParamField>
+
+### Resource Management Parameters
+
+<ParamField path="RECURSOS" type="array" required>
+  List of resource names available in the system.
+  
+  Resources are used for process synchronization. Each resource must have a corresponding entry in INSTANCIAS_RECURSOS.
+  
+  **Format:** `[RESOURCE1,RESOURCE2,...]`
+  
+  **Example:** `[R1,R2,R3,R4]`
+</ParamField>
+
+<ParamField path="INSTANCIAS_RECURSOS" type="array" required>
+  Number of instances for each resource.
+  
+  Must have the same number of elements as RECURSOS. Each value represents how many instances of the corresponding resource are available.
+  
+  **Format:** `[COUNT1,COUNT2,...]`
+  
+  **Example:** `[1,1,1,1]`
+</ParamField>
+
+### Multiprogramming Parameters
+
+<ParamField path="GRADO_MULTIPROGRAMACION_INI" type="integer" required>
+  Initial degree of multiprogramming.
+  
+  Maximum number of processes that can be in the ready/blocked/executing states simultaneously. Controls how many processes transition from NEW to READY.
+  
+  **Example:** `10`
+</ParamField>
+
+## Configuration Example
+
+```properties
+IP_MEMORIA=127.0.0.1
+PUERTO_MEMORIA=8002
+IP_FILESYSTEM=127.0.0.1
+PUERTO_FILESYSTEM=8003
+IP_CPU=127.0.0.1
+PUERTO_CPU_DISPATCH=8006
+PUERTO_CPU_INTERRUPT=8007
+ALGORITMO_PLANIFICACION=FIFO
+QUANTUM=2000
+RECURSOS=[R1,R2,R3,R4]
+INSTANCIAS_RECURSOS=[1,1,1,1]
+GRADO_MULTIPROGRAMACION_INI=10
+```
+
+## Scheduling Algorithms
+
+### FIFO (First In First Out)
+- **Non-preemptive:** Process runs until it blocks or terminates
+- **Simple:** First process in ready queue is executed
+- **No quantum needed**
+
+### RR (Round Robin)
+- **Preemptive:** Process is interrupted after QUANTUM milliseconds
+- **Fair:** All processes get equal CPU time slices
+- **Requires QUANTUM parameter**
+
+### PRIORIDADES (Priorities)
+- **Preemptive:** Higher priority process preempts lower priority
+- **Priority-based:** Process with lowest priority value executes first
+- **Can cause starvation** of low-priority processes
+
+## Resource Management
+
+Resources are managed using semaphore-like semantics:
+
+- **WAIT instruction:** Decrements resource instances, blocks if unavailable
+- **SIGNAL instruction:** Increments resource instances, unblocks waiting process
+
+Example resource configuration:
+```properties
+RECURSOS=[DISK,PRINTER,SCANNER]
+INSTANCIAS_RECURSOS=[2,1,1]
+```
+
+This creates:
+- 2 instances of DISK
+- 1 instance of PRINTER
+- 1 instance of SCANNER
+
+## Console Commands
+
+The Kernel provides interactive console commands:
+
+- `INICIAR_PROCESO <path> <size> <priority>` - Create new process
+- `FINALIZAR_PROCESO <pid>` - Terminate a process
+- `DETENER_PLANIFICACION` - Pause scheduling
+- `INICIAR_PLANIFICACION` - Resume scheduling
+- `MULTIPROGRAMACION <value>` - Change multiprogramming degree
+- `PROCESO_ESTADO` - Show processes in each state
+
+## Notes
+
+<Note>
+  The Kernel implements both long-term planning (NEW → READY based on multiprogramming degree) and short-term scheduling (READY → EXEC based on algorithm).
+</Note>
+
+<Warning>
+  When using PRIORIDADES algorithm, ensure processes have different priority values to see preemption. Lower numeric values indicate higher priority.
+</Warning>
+
+<Tip>
+  The QUANTUM parameter is only used with Round Robin scheduling. For FIFO and PRIORIDADES, you can set any value as it will be ignored.
+</Tip>

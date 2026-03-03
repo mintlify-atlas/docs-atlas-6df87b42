@@ -1,0 +1,122 @@
+---
+title: 'Memory Configuration'
+description: 'Configuration parameters for the Memory module'
+---
+
+The Memory module manages physical memory, page tables, and instruction storage. It implements paging with page replacement algorithms.
+
+## Configuration File
+
+The Memory module reads its configuration from a `.config` file passed as a command-line argument:
+
+```bash
+./memoria memoria.config
+```
+
+## Configuration Parameters
+
+<ParamField path="PUERTO_ESCUCHA" type="integer" required>
+  Port number where Memory will listen for incoming connections from CPU and Kernel.
+  
+  **Example:** `8002`
+</ParamField>
+
+<ParamField path="IP_FILESYSTEM" type="string" required>
+  IP address of the Filesystem module for swap operations.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_FILESYSTEM" type="integer" required>
+  Port number where the Filesystem module is listening.
+  
+  **Example:** `8003`
+</ParamField>
+
+<ParamField path="TAM_MEMORIA" type="integer" required>
+  Total size of physical memory in bytes.
+  
+  Must be divisible by TAM_PAGINA to avoid wasted space.
+  
+  **Example:** `512` (512 bytes)
+</ParamField>
+
+<ParamField path="TAM_PAGINA" type="integer" required>
+  Page size in bytes.
+  
+  This determines the granularity of memory management. Smaller pages reduce internal fragmentation but increase page table overhead.
+  
+  **Example:** `16` (16 bytes per page)
+</ParamField>
+
+<ParamField path="PATH_INSTRUCCIONES" type="string" required>
+  Path to the directory containing instruction files for processes.
+  
+  Memory reads instruction files from this directory when servicing fetch requests from CPU.
+  
+  **Example:** `./mappa-pruebas`
+</ParamField>
+
+<ParamField path="RETARDO_RESPUESTA" type="integer" required>
+  Response delay in milliseconds for memory operations.
+  
+  Simulates memory access time. Applied to read/write operations.
+  
+  **Example:** `500` (500ms delay)
+</ParamField>
+
+<ParamField path="ALGORITMO_REEMPLAZO" type="string" required>
+  Page replacement algorithm to use when memory is full.
+  
+  **Valid values:**
+  - `FIFO` - First In First Out (oldest page is replaced)
+  - `LRU` - Least Recently Used (least recently accessed page is replaced)
+  
+  **Example:** `FIFO`
+</ParamField>
+
+## Configuration Example
+
+```properties
+PUERTO_ESCUCHA=8002
+IP_FILESYSTEM=127.0.0.1
+PUERTO_FILESYSTEM=8003
+TAM_MEMORIA=512
+TAM_PAGINA=16
+PATH_INSTRUCCIONES=./mappa-pruebas
+RETARDO_RESPUESTA=500
+ALGORITMO_REEMPLAZO=FIFO
+```
+
+## Memory Management
+
+The Memory module manages:
+
+- **Page tables** for each process
+- **Physical memory frames** (TAM_MEMORIA / TAM_PAGINA frames total)
+- **Page replacement** using the configured algorithm
+- **Swap operations** with the Filesystem module
+
+### Calculating Memory Capacity
+
+With the example configuration:
+- Total frames: 512 / 16 = **32 frames**
+- Each process page table can reference up to 32 pages in memory
+
+## Page Replacement Algorithms
+
+### FIFO (First In First Out)
+Replaces the oldest page loaded into memory. Simple but may replace frequently used pages.
+
+### LRU (Least Recently Used)
+Replaces the page that hasn't been accessed for the longest time. Better performance but requires tracking access times.
+
+## Notes
+
+<Note>
+  The RETARDO_RESPUESTA parameter is useful for simulating realistic memory access times and testing system behavior under different performance scenarios.
+</Note>
+
+<Warning>
+  Ensure TAM_MEMORIA is divisible by TAM_PAGINA. For example, with TAM_PAGINA=16, use TAM_MEMORIA values like 256, 512, 1024, etc.
+</Warning>

@@ -1,0 +1,1174 @@
+---
+title: 'Protocol API'
+description: 'Inter-process communication protocol for MAPPA OS modules'
+---
+
+The Protocol API provides functions for serializing, sending, and receiving messages between different modules of the MAPPA OS simulator (Kernel, Memory, CPU, and Filesystem).
+
+## Data Structures
+
+### op_code
+
+Enumeration of all operation codes used in the protocol.
+
+```c
+typedef enum {
+    // System Operations
+    HAY_ALGO_MAL,
+    MENSAJE,
+    PAQUETE,
+    
+    // Process Control Block (PCB) Operations
+    ENVIO_PCB,
+    PCB_SIGNAL,
+    PCB_WAIT,
+    PCB_SLEEP,
+    PCB_INTERRUPCION,
+    PCB_EXIT,
+    PCB_PAGEFAULT,
+    
+    // Process Management
+    INICIALIZAR_PROCESO,
+    FINALIZAR_PROCESO,
+    CAMBIAR_ESTADO,
+    INTERRUPCION,
+    INTERRUPCION_FINALIZAR,
+    
+    // Resource Management
+    MANEJAR_IO,
+    MANEJAR_WAIT,
+    MANEJAR_SIGNAL,
+    
+    // Memory Operations
+    CONEXION_MEMORIA,
+    PEDIDO_MARCO,
+    ENVIO_MARCO,
+    TAMANIO_PAGINA,
+    CARGAR_PAGINA,
+    PAGINA_CARGADA,
+    
+    // Swap Operations
+    RESERVA_SWAP,
+    BLOQUES_RESERVADOS,
+    LIBERACION_SWAP,
+    PEDIDO_SWAP,
+    ESCRIBIR_SWAP,
+    
+    // Filesystem Operations
+    ABRIR_ARCHIVO,
+    CREAR_ARCHIVO,
+    TRUNCAR_ARCHIVO,
+    PEDIDO_LECTURA_FS,
+    PEDIDO_ESCRITURA_FS,
+    FIN_ESCRITURA,
+    ARCHIVO_EXISTE,
+    ARCHIVO_NO_EXISTE,
+    ARCHIVO_CREADO,
+    
+    // Instruction Operations
+    ENVIO_INSTRUCCION,
+    ENVIO_DIRECCION,
+    ENVIO_LISTA_ARCHIVOS,
+    
+    // Instructions
+    SET,
+    ADD,
+    MOV_IN,
+    MOV_OUT,
+    IO,
+    SIGNAL,
+    EXIT,
+    WAIT,
+    F_OPEN,
+    YIELD,
+    F_TRUNCATE,
+    F_SEEK,
+    CREATE_SEGMENT,
+    F_WRITE,
+    F_READ,
+    DELETE_SEGMENT,
+    F_CLOSE,
+    
+    // Error Codes
+    UNKNOWN_OP,
+    ERROR_MEMORIA
+} op_code;
+```
+
+### t_buffer
+
+Buffer structure for storing serialized data.
+
+```c
+typedef struct {
+    int size;        // Size of the data in bytes
+    void *stream;    // Pointer to the data
+} t_buffer;
+```
+
+### t_paquete
+
+Packet structure for sending data with an operation code.
+
+```c
+typedef struct {
+    op_code codigo_operacion;  // Operation code identifying the message type
+    t_buffer *buffer;          // Buffer containing the serialized data
+} t_paquete;
+```
+
+### estado_proceso
+
+Process state enumeration.
+
+```c
+typedef enum {
+    NEW,
+    READY,
+    EXEC,
+    BLOCK,
+    EXIT_ESTADO
+} estado_proceso;
+```
+
+### pcb
+
+Process Control Block structure.
+
+```c
+typedef struct {
+    int pid;                    // Process identifier
+    int pc;                     // Program counter (next instruction to execute)
+    int size;                   // Process size
+    int prioridad;              // Process priority
+    int tiempo_ejecucion;       // Execution time
+    char *path;                 // Path to the process instructions file
+    estado_proceso estado;      // Current process state
+    t_registros *registros;     // CPU registers
+    t_list *archivos;           // List of open files
+} pcb;
+```
+
+### Instruccion
+
+Instruction structure.
+
+```c
+typedef struct {
+    char *opcode;      // Operation code (e.g., "SET", "ADD", "MOV_IN")
+    char *operando1;   // First operand
+    char *operando2;   // Second operand
+} Instruccion;
+```
+
+## Core Functions
+
+### serializar_paquete
+
+Serializes a packet into a byte stream for transmission.
+
+```c
+void* serializar_paquete(t_paquete* paquete, int bytes);
+```
+
+**Parameters:**
+- `paquete`: Pointer to the packet to serialize
+- `bytes`: Total size in bytes (typically `paquete->buffer->size + 2*sizeof(int)`)
+
+**Returns:**
+- Pointer to the serialized data (must be freed by caller)
+
+**Description:**
+Serializes a packet by copying the operation code, buffer size, and buffer data into a contiguous memory block. The format is:
+1. Operation code (4 bytes)
+2. Buffer size (4 bytes)
+3. Buffer data (variable size)
+
+**Example:**
+```c
+t_paquete* paquete = crear_paquete(ENVIO_PCB);
+agregar_a_paquete(paquete, &pid, sizeof(int));
+int bytes = paquete->buffer->size + 2*sizeof(int);
+void* serializado = serializar_paquete(paquete, bytes);
+send(socket, serializado, bytes, 0);
+free(serializado);
+```
+
+### enviar_mensaje
+
+Sends a simple text message to a socket.
+
+```c
+void enviar_mensaje(char* mensaje, int socket_cliente);
+```
+
+**Parameters:**
+- `mensaje`: Null-terminated string to send
+- `socket_cliente`: Socket file descriptor
+
+**Description:**
+Creates a packet with operation code `MENSAJE`, serializes the message string, and sends it through the socket.
+
+**Example:**
+```c
+enviar_mensaje("Process initialized", socket_kernel);
+```
+
+### recibir_operacion
+
+Receives the operation code from a socket.
+
+```c
+int recibir_operacion(int socket_cliente);
+```
+
+**Parameters:**
+- `socket_cliente`: Socket file descriptor
+
+**Returns:**
+- Operation code as an integer
+- `-1` if the connection was closed or an error occurred
+
+**Description:**
+Reads the first 4 bytes from the socket to determine the operation code. This should be called before receiving the actual data payload.
+
+**Example:**
+```c
+int cod_op = recibir_operacion(socket_cliente);
+if (cod_op == -1) {
+    log_error(logger, "Connection closed");
+    return;
+}
+
+switch(cod_op) {
+    case ENVIO_PCB:
+        pcb* proceso = recv_pcb(socket_cliente);
+        break;
+    case MENSAJE:
+        recibir_mensaje(logger, socket_cliente);
+        break;
+}
+```
+
+### recibir_buffer
+
+Receives a buffer from a socket.
+
+```c
+void* recibir_buffer(int* size, int socket_cliente);
+```
+
+**Parameters:**
+- `size`: Pointer to store the received buffer size
+- `socket_cliente`: Socket file descriptor
+
+**Returns:**
+- Pointer to the received buffer (must be freed by caller)
+
+**Description:**
+First receives the buffer size (4 bytes), then allocates memory and receives the buffer data.
+
+### recibir_mensaje
+
+Receives and logs a text message from a socket.
+
+```c
+void recibir_mensaje(t_log* logger, int socket_cliente);
+```
+
+**Parameters:**
+- `logger`: Logger instance for output
+- `socket_cliente`: Socket file descriptor
+
+**Description:**
+Receives a text message and logs it using the provided logger. Automatically frees the received buffer.
+
+### recibir_paquete
+
+Receives a packet and deserializes it into a list.
+
+```c
+t_list* recibir_paquete(int socket_cliente);
+```
+
+**Parameters:**
+- `socket_cliente`: Socket file descriptor
+
+**Returns:**
+- List containing the deserialized packet elements
+- `NULL` if an error occurred
+
+**Description:**
+Receives a buffer and unpacks it into a list. Each element in the packet is stored with its size prefix. The returned list must be destroyed when no longer needed.
+
+**Example:**
+```c
+t_list* paquete = recibir_paquete(socket_cliente);
+if (paquete == NULL) {
+    log_error(logger, "Error receiving packet");
+    return;
+}
+
+int* valor1 = list_get(paquete, 0);
+char* valor2 = list_get(paquete, 1);
+
+list_destroy_and_destroy_elements(paquete, free);
+```
+
+## Packet Management
+
+### crear_paquete
+
+Creates a new packet with the specified operation code.
+
+```c
+t_paquete* crear_paquete(op_code codigo_op);
+```
+
+**Parameters:**
+- `codigo_op`: Operation code for the packet
+
+**Returns:**
+- Pointer to the newly created packet
+
+**Example:**
+```c
+t_paquete* paquete = crear_paquete(ENVIO_PCB);
+```
+
+### agregar_a_paquete
+
+Adds data to a packet.
+
+```c
+void agregar_a_paquete(t_paquete* paquete, void* valor, int tamanio);
+```
+
+**Parameters:**
+- `paquete`: Packet to add data to
+- `valor`: Pointer to the data to add
+- `tamanio`: Size of the data in bytes
+
+**Description:**
+Appends data to the packet's buffer. Each value is stored with a size prefix for deserialization.
+
+**Example:**
+```c
+t_paquete* paquete = crear_paquete(INICIALIZAR_PROCESO);
+int pid = 42;
+char* path = "/path/to/instructions";
+
+agregar_a_paquete(paquete, &pid, sizeof(int));
+agregar_a_paquete(paquete, path, strlen(path) + 1);
+```
+
+### enviar_paquete
+
+Serializes and sends a packet through a socket.
+
+```c
+void enviar_paquete(t_paquete* paquete, int socket_cliente);
+```
+
+**Parameters:**
+- `paquete`: Packet to send
+- `socket_cliente`: Socket file descriptor
+
+**Description:**
+Serializes the packet and sends it. Does not free the packet.
+
+### eliminar_paquete
+
+Frees a packet and its buffer.
+
+```c
+void eliminar_paquete(t_paquete* paquete);
+```
+
+**Parameters:**
+- `paquete`: Packet to free
+
+## PCB Operations
+
+### send_pcb
+
+Sends a Process Control Block to a module.
+
+```c
+void send_pcb(pcb* contexto, int fd_modulo);
+```
+
+**Parameters:**
+- `contexto`: PCB to send
+- `fd_modulo`: Socket file descriptor of the destination module
+
+**Example:**
+```c
+pcb* proceso = crear_pcb(pid, path, prioridad);
+send_pcb(proceso, socket_cpu);
+```
+
+### recv_pcb
+
+Receives a Process Control Block from a module.
+
+```c
+pcb* recv_pcb(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Pointer to the received PCB (must be freed with `pcb_destroyer`)
+
+**Example:**
+```c
+pcb* proceso = recv_pcb(socket_kernel);
+log_info(logger, "Received PCB for PID: %d", proceso->pid);
+```
+
+### pcb_destroyer
+
+Frees a PCB and all its associated resources.
+
+```c
+void pcb_destroyer(pcb* contexto);
+```
+
+**Parameters:**
+- `contexto`: PCB to free
+
+## Process Management
+
+### send_inicializar_proceso
+
+Sends a request to initialize a process.
+
+```c
+void send_inicializar_proceso(pcb* contexto, int fd_modulo);
+```
+
+**Parameters:**
+- `contexto`: PCB of the process to initialize
+- `fd_modulo`: Socket file descriptor (typically Memory module)
+
+### send_terminar_proceso
+
+Sends a request to terminate a process.
+
+```c
+void send_terminar_proceso(int pid, int fd_modulo);
+```
+
+**Parameters:**
+- `pid`: Process identifier
+- `fd_modulo`: Socket file descriptor
+
+### recv_terminar_proceso
+
+Receives a process termination request.
+
+```c
+int recv_terminar_proceso(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Process identifier (PID) of the process to terminate
+
+### send_cambiar_estado
+
+Sends a request to change a process state.
+
+```c
+void send_cambiar_estado(estado_proceso estado, int fd_modulo);
+```
+
+**Parameters:**
+- `estado`: New process state (NEW, READY, EXEC, BLOCK, EXIT_ESTADO)
+- `fd_modulo`: Socket file descriptor
+
+### recv_cambiar_estado
+
+Receives a process state change request.
+
+```c
+estado_proceso recv_cambiar_estado(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- New process state
+
+## Instruction Operations
+
+### send_instruccion
+
+Sends an instruction to a module.
+
+```c
+void send_instruccion(int socket_cliente, Instruccion instruccion);
+```
+
+**Parameters:**
+- `socket_cliente`: Socket file descriptor
+- `instruccion`: Instruction structure to send
+
+**Example:**
+```c
+Instruccion inst;
+inst.opcode = "SET";
+inst.operando1 = "AX";
+inst.operando2 = "10";
+
+send_instruccion(socket_cpu, inst);
+```
+
+### recv_instruccion
+
+Receives an instruction from a module.
+
+```c
+Instruccion recv_instruccion(int socket_cliente);
+```
+
+**Parameters:**
+- `socket_cliente`: Socket file descriptor
+
+**Returns:**
+- Instruction structure (must be freed with `destroyInstruccion`)
+
+### send_fetch_instruccion
+
+Sends a request to fetch an instruction.
+
+```c
+void send_fetch_instruccion(char* path, int pc, int fd_modulo);
+```
+
+**Parameters:**
+- `path`: Path to the instructions file
+- `pc`: Program counter (instruction number)
+- `fd_modulo`: Socket file descriptor (typically Memory module)
+
+### recv_fetch_instruccion
+
+Receives an instruction fetch request.
+
+```c
+int recv_fetch_instruccion(int fd_modulo, char** path, int** pc);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `path`: Pointer to store the path string
+- `pc`: Pointer to store the program counter
+
+**Returns:**
+- 0 on success
+
+## I/O and Resource Operations
+
+### send_tiempo_io
+
+Sends an I/O time request.
+
+```c
+void send_tiempo_io(int tiempo_io, int fd_modulo);
+```
+
+**Parameters:**
+- `tiempo_io`: Time in milliseconds for the I/O operation
+- `fd_modulo`: Socket file descriptor
+
+### recv_tiempo_io
+
+Receives an I/O time request.
+
+```c
+int recv_tiempo_io(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- I/O time in milliseconds
+
+### send_recurso_wait
+
+Sends a WAIT operation for a resource.
+
+```c
+void send_recurso_wait(char* recurso, int fd_modulo);
+```
+
+**Parameters:**
+- `recurso`: Resource name
+- `fd_modulo`: Socket file descriptor
+
+### send_recurso_signal
+
+Sends a SIGNAL operation for a resource.
+
+```c
+void send_recurso_signal(char* recurso, int fd_modulo);
+```
+
+**Parameters:**
+- `recurso`: Resource name
+- `fd_modulo`: Socket file descriptor
+
+### recv_recurso
+
+Receives a resource name.
+
+```c
+char* recv_recurso(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Resource name string (must be freed)
+
+## Memory Operations
+
+### send_pedido_marco
+
+Sends a request for a memory frame.
+
+```c
+void send_pedido_marco(int fd_modulo, int pid, int pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor (typically Memory module)
+- `pid`: Process identifier
+- `pagina`: Page number
+
+### recv_pedido_marco
+
+Receives a memory frame request.
+
+```c
+void recv_pedido_marco(int fd_modulo, int *pid, int *pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `pid`: Pointer to store the process identifier
+- `pagina`: Pointer to store the page number
+
+### send_marco
+
+Sends a memory frame number.
+
+```c
+void send_marco(int fd_modulo, int memoria_fisica);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `memoria_fisica`: Physical memory frame number
+
+### recv_marco
+
+Receives a memory frame number.
+
+```c
+int recv_marco(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Physical memory frame number
+
+### send_tam_pagina
+
+Sends the page size.
+
+```c
+void send_tam_pagina(int tam, int fd_modulo);
+```
+
+**Parameters:**
+- `tam`: Page size in bytes
+- `fd_modulo`: Socket file descriptor
+
+### recv_tam_pagina
+
+Receives the page size.
+
+```c
+int recv_tam_pagina(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Page size in bytes
+
+### send_cargar_pagina
+
+Sends a request to load a page into memory.
+
+```c
+void send_cargar_pagina(int fd_modulo, int pid, int pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `pid`: Process identifier
+- `pagina`: Page number to load
+
+### recv_cargar_pagina
+
+Receives a page load request.
+
+```c
+void recv_cargar_pagina(int fd_modulo, int *pid, int *pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `pid`: Pointer to store the process identifier
+- `pagina`: Pointer to store the page number
+
+## Page Fault Handling
+
+### send_pcb_page_fault
+
+Sends a PCB with a page fault notification.
+
+```c
+void send_pcb_page_fault(int fd_modulo, pcb* contexto, int pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `contexto`: PCB of the process that caused the page fault
+- `pagina`: Page number that caused the fault
+
+### recv_pcb_page_fault
+
+Receives a PCB with page fault information.
+
+```c
+void recv_pcb_page_fault(int fd_modulo, pcb** contexto, int *pagina);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `contexto`: Pointer to store the received PCB
+- `pagina`: Pointer to store the page number
+
+## Swap Operations
+
+### send_reserva_swap
+
+Sends a request to reserve swap space.
+
+```c
+void send_reserva_swap(int fd, int cant_paginas_necesarias);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `cant_paginas_necesarias`: Number of pages to reserve
+
+### recv_reserva_swap
+
+Receives swap reservation data.
+
+```c
+t_list* recv_reserva_swap(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- List of reserved swap blocks
+
+### send_liberacion_swap
+
+Sends a request to free swap space.
+
+```c
+void send_liberacion_swap(int fd, int cantidad, int bloques[]);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `cantidad`: Number of blocks to free
+- `bloques`: Array of block numbers
+
+### send_pedido_swap
+
+Sends a request to read from swap.
+
+```c
+void send_pedido_swap(int fd, int posicion_swap);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `posicion_swap`: Position in swap to read from
+
+### send_leido_swap
+
+Sends data read from swap.
+
+```c
+void send_leido_swap(int fd, char* leido, int tam_pagina);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `leido`: Data read from swap
+- `tam_pagina`: Page size in bytes
+
+### recv_leido_swap
+
+Receives data from swap.
+
+```c
+char* recv_leido_swap(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Data read from swap (must be freed)
+
+## Filesystem Operations
+
+### send_abrir_archivo
+
+Sends a request to open a file.
+
+```c
+void send_abrir_archivo(char* nombre_archivo, int fd_modulo);
+```
+
+**Parameters:**
+- `nombre_archivo`: File name
+- `fd_modulo`: Socket file descriptor (typically Filesystem module)
+
+### send_crear_archivo
+
+Sends a request to create a file.
+
+```c
+void send_crear_archivo(char* nombre_archivo, int fd_modulo);
+```
+
+**Parameters:**
+- `nombre_archivo`: File name
+- `fd_modulo`: Socket file descriptor
+
+### send_truncar
+
+Sends a request to truncate a file.
+
+```c
+void send_truncar(char* nombre_archivo, int tamanio_archivo, int fd);
+```
+
+**Parameters:**
+- `nombre_archivo`: File name
+- `tamanio_archivo`: New file size
+- `fd`: Socket file descriptor
+
+### send_leer_archivo
+
+Sends a request to read from a file.
+
+```c
+void send_leer_archivo(int fd_modulo, char* nombre_archivo, 
+                       DireccionFisica direccion, int puntero);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `nombre_archivo`: File name
+- `direccion`: Physical memory address to store the data
+- `puntero`: File pointer position
+
+### send_escribir_archivo
+
+Sends a request to write to a file.
+
+```c
+void send_escribir_archivo(int fd_modulo, char* nombre_archivo, 
+                           DireccionFisica direccion, int puntero);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `nombre_archivo`: File name
+- `direccion`: Physical memory address containing the data
+- `puntero`: File pointer position
+
+### recv_f_open
+
+Receives a file open request.
+
+```c
+void recv_f_open(int fd, char** nombre_archivo, char** modo_apertura, pcb** contexto);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `nombre_archivo`: Pointer to store the file name
+- `modo_apertura`: Pointer to store the open mode ("r", "w")
+- `contexto`: Pointer to store the PCB
+
+### recv_f_close
+
+Receives a file close request.
+
+```c
+void recv_f_close(int fd, char** nombre_archivo, pcb** contexto);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `nombre_archivo`: Pointer to store the file name
+- `contexto`: Pointer to store the PCB
+
+### recv_f_truncate
+
+Receives a file truncate request.
+
+```c
+void recv_f_truncate(int fd, char** nombre_archivo, int* tam, pcb** contexto);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `nombre_archivo`: Pointer to store the file name
+- `tam`: Pointer to store the new size
+- `contexto`: Pointer to store the PCB
+
+### recv_f_write
+
+Receives a file write request (also used for F_READ).
+
+```c
+void recv_f_write(int fd, char** nombre_archivo, DireccionFisica* direccion, pcb** contexto);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `nombre_archivo`: Pointer to store the file name
+- `direccion`: Pointer to store the physical memory address
+- `contexto`: Pointer to store the PCB
+
+### recv_respuesta_abrir_archivo
+
+Receives the response from a file open operation.
+
+```c
+int recv_respuesta_abrir_archivo(int fd_filesystem);
+```
+
+**Parameters:**
+- `fd_filesystem`: Socket file descriptor
+
+**Returns:**
+- File size or status code
+
+## File List Operations
+
+### send_archivos
+
+Sends a list of files.
+
+```c
+void send_archivos(int fd_modulo, t_list* lista_archivos);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+- `lista_archivos`: List of `t_archivo_proceso` structures
+
+### recv_archivos
+
+Receives a list of files.
+
+```c
+t_list* recv_archivos(t_log* logger, int fd_modulo);
+```
+
+**Parameters:**
+- `logger`: Logger instance
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- List of `t_archivo_proceso` structures (must be freed with `lista_archivos_destroy`)
+
+## Interrupt Operations
+
+### send_interrupcion
+
+Sends an interrupt request.
+
+```c
+void send_interrupcion(int pid, int fd_modulo);
+```
+
+**Parameters:**
+- `pid`: Process identifier to interrupt
+- `fd_modulo`: Socket file descriptor (typically CPU module)
+
+### recv_interrupcion
+
+Receives an interrupt request.
+
+```c
+int recv_interrupcion(int fd_modulo);
+```
+
+**Parameters:**
+- `fd_modulo`: Socket file descriptor
+
+**Returns:**
+- Process identifier to interrupt
+
+### send_pcbDesalojado
+
+Sends a PCB that was evicted from CPU.
+
+```c
+void send_pcbDesalojado(pcb* contexto, char* instruccion, char* extra, 
+                        int fd, t_log* logger);
+```
+
+**Parameters:**
+- `contexto`: PCB of the evicted process
+- `instruccion`: Reason for eviction ("SIGNAL", "WAIT", "EXIT", "SLEEP", "INTERRUPCION", "PAGEFAULT")
+- `extra`: Additional information (resource name, page number, etc.)
+- `fd`: Socket file descriptor
+- `logger`: Logger instance
+
+**Description:**
+Sends a PCB back to the Kernel with the reason for eviction. The operation code is automatically determined based on the `instruccion` parameter.
+
+### recv_pcbDesalojado
+
+Receives an evicted PCB.
+
+```c
+void recv_pcbDesalojado(int fd, pcb** contexto, char** extra);
+```
+
+**Parameters:**
+- `fd`: Socket file descriptor
+- `contexto`: Pointer to store the PCB
+- `extra`: Pointer to store additional information
+
+## Utility Functions
+
+### crear_buffer
+
+Initializes an empty buffer in a packet.
+
+```c
+void crear_buffer(t_paquete* paquete);
+```
+
+**Parameters:**
+- `paquete`: Packet to initialize
+
+### registros_destroy
+
+Frees a register structure.
+
+```c
+void registros_destroy(t_registros* registros);
+```
+
+**Parameters:**
+- `registros`: Register structure to free
+
+### destroyInstruccion
+
+Frees an instruction structure.
+
+```c
+void destroyInstruccion(Instruccion instruccion);
+```
+
+**Parameters:**
+- `instruccion`: Instruction to free
+
+### lista_archivos_destroy
+
+Frees a file list and all its elements.
+
+```c
+void lista_archivos_destroy(t_list* lista);
+```
+
+**Parameters:**
+- `lista`: File list to free
+
+## Usage Example
+
+Here's a complete example of sending a process from Kernel to CPU:
+
+```c
+// Create a PCB
+pcb* proceso = malloc(sizeof(pcb));
+proceso->pid = 1;
+proceso->pc = 0;
+proceso->prioridad = 5;
+proceso->path = strdup("/path/to/instructions");
+proceso->estado = EXEC;
+
+// Initialize registers
+proceso->registros = malloc(sizeof(t_registros));
+proceso->registros->ax = malloc(sizeof(uint32_t));
+*proceso->registros->ax = 0;
+// ... initialize other registers
+
+// Initialize file list
+proceso->archivos = list_create();
+
+// Send to CPU
+send_pcb(proceso, socket_cpu);
+log_info(logger, "PCB sent to CPU for execution");
+
+// Receive evicted PCB
+int cod_op = recibir_operacion(socket_cpu);
+if (cod_op == PCB_INTERRUPCION) {
+    pcb* pcb_evicted;
+    char* motivo;
+    recv_pcbDesalojado(socket_cpu, &pcb_evicted, &motivo);
+    log_info(logger, "Process %d interrupted: %s", pcb_evicted->pid, motivo);
+    
+    // Clean up
+    free(motivo);
+    pcb_destroyer(pcb_evicted);
+}
+```
+
+## Notes
+
+- All send/recv functions handle serialization and deserialization automatically
+- Memory management: Received packets, PCBs, and strings must be freed by the caller
+- The protocol uses size prefixes for all variable-length data
+- Operation codes determine the message format and handler
+- Always call `recibir_operacion` before receiving the payload to determine the message type

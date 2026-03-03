@@ -1,0 +1,552 @@
+---
+title: 'Kernel Module'
+description: 'Process scheduling, resource management, and system coordination'
+---
+
+## Overview
+
+The Kernel module is the central coordinator of MAPPA OS, responsible for:
+
+- **Process state management** (NEW, READY, EXEC, BLOCK, EXIT)
+- **Long-term and short-term scheduling**
+- **Resource management** with deadlock detection
+- **File management coordination**
+- **Multiprogramming degree control**
+
+## Process States
+
+The kernel manages processes through five states:
+
+```c
+// State queues
+t_queue* cola_new;    // Newly created processes
+t_queue* cola_ready;  // Ready to execute
+t_queue* cola_exec;   // Currently executing
+t_queue* cola_block;  // Blocked (I/O, resources)
+t_queue* cola_exit;   // Terminated processes
+```
+
+Reference: `source/kernel/src/main.h:55-59`
+
+### State Transitions
+
+#### NEW → READY (Long-term Planner)
+
+```c
+void* planif_largo_plazo(void* args) {
+    while(1) {
+        sem_wait(&cantidad_new);
+        sem_wait(&cantidad_multiprogramacion);
+        pthread_mutex_lock(&mutex_plani_larga);
+        sem_wait(&sem_plan_largo);
+        
+        // Move from NEW to READY
+        pcb* proceso = sacar_de_new();
+        agregar_a_ready(proceso);
+        
+        sem_post(&sem_plan_largo);
+        pthread_mutex_unlock(&mutex_plani_larga);
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:370-384`
+
+#### READY → EXEC (Short-term Planner)
+
+```c
+void* planif_corto_plazo(void* args) {
+    pthread_t hilo_interrupciones;
+    crear_hilo_interrupcion(algoritmo_planificacion, hilo_interrupciones);
+    
+    while(1) {
+        sem_wait(&puedo_ejecutar_proceso);
+        sem_wait(&cantidad_ready);
+        pthread_mutex_lock(&mutex_plani_corta);
+        sem_wait(&sem_plan_corto);
+
+        pcb *proceso_a_ejecutar = NULL;
+        
+        if (planificacion_activa && !list_is_empty(cola_ready->elements)) {
+            proceso_a_ejecutar = obtener_siguiente_proceso(algoritmo_planificacion);
+        }
+
+        if (proceso_a_ejecutar != NULL) {
+            agregar_a_exec(proceso_a_ejecutar);
+            send_pcb(proceso_a_ejecutar, fd_cpu_dispatch);
+            sem_post(&control_interrupciones_rr);
+        } else {
+            sem_post(&puedo_ejecutar_proceso);  
+        }
+
+        sem_post(&sem_plan_corto);
+        pthread_mutex_unlock(&mutex_plani_corta);
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:386-415`
+
+### State Management Functions
+
+```c
+void agregar_a_ready(pcb* proceso) {
+    cambiar_estado(proceso, READY);
+    pthread_mutex_lock(&mutex_ready);
+    queue_push(cola_ready, proceso);
+    pthread_mutex_unlock(&mutex_ready);
+    
+    t_list *lista_a_loguear = pid_lista_ready(cola_ready->elements);
+    char *lista = list_to_string(lista_a_loguear);
+    log_info(logger_kernel, "Cola Ready %s: %s", algoritmo_planificacion, lista);
+    
+    list_destroy(lista_a_loguear);
+    free(lista);
+    sem_post(&cantidad_ready);
+    sem_post(&control_interrupciones_prioridades);
+}
+
+void agregar_a_exec(pcb* proceso) {
+    pcb_desalojado = false;
+    cambiar_estado(proceso, EXEC);
+    pthread_mutex_lock(&mutex_exec);
+    queue_push(cola_exec, proceso);
+    pthread_mutex_unlock(&mutex_exec);
+    sem_post(&cantidad_exec);
+}
+```
+
+Reference: `source/kernel/src/main.c:308-352`
+
+## Long-term Planner
+
+Controls the **multiprogramming degree** - the number of processes allowed in memory:
+
+```c
+void iniciar_proceso(char * path, char* size, char* prioridad) {   
+    // Create new process PCB
+    pcb* proceso = crear_pcb(path, size, prioridad);
+    agregar_a_new(proceso);
+    
+    // Initialize process in memory
+    send_inicializar_proceso(proceso, fd_memoria);
+    recibir_operacion(fd_memoria);
+    recibir_mensaje(logger_kernel, fd_memoria);
+}
+
+void agregar_a_new(pcb* proceso) {
+    cambiar_estado(proceso, NEW);
+    pthread_mutex_lock(&mutex_new);
+    queue_push(cola_new, proceso);
+    pthread_mutex_unlock(&mutex_new);
+    log_info(logger_kernel, "Se crea el proceso %d en NEW", proceso->pid);
+    sem_post(&cantidad_new);
+}
+```
+
+Reference: `source/kernel/src/main.c:163-297`
+
+### Multiprogramming Degree Control
+
+```c
+void cambiar_multiprogramacion(char* nuevo_grado_multiprogramacion) {
+    log_info(logger_kernel, "Grado Anterior: %d - Grado Actual: %d", 
+             grado_multiprogramacion, atoi(nuevo_grado_multiprogramacion));
+    
+    while (grado_multiprogramacion > atoi(nuevo_grado_multiprogramacion)) {
+        sem_wait(&cantidad_multiprogramacion);
+        grado_multiprogramacion--;
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:239-247`
+
+## Short-term Planner
+
+Selects which process to execute next based on the configured scheduling algorithm:
+
+### FIFO (First In First Out)
+
+```c
+pcb* obtenerSiguienteFIFO() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    procesoPlanificado = queue_pop(cola_ready);
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+```
+
+Reference: `source/kernel/src/main.c:499-506`
+
+### Round Robin (RR)
+
+```c
+pcb* obtenerSiguienteRR() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    procesoPlanificado = queue_pop(cola_ready);
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+
+void controlar_interrupcion_rr() {
+    while(1) {
+        sem_wait(&control_interrupciones_rr);
+        cpu_disponible = false;
+        log_info(logger_kernel, "Inicia Quantum");
+        usleep(quantum * 1000);
+        log_info(logger_kernel, "Quantum Finalizado");
+        
+        if(!cpu_disponible) {
+            if(list_size(cola_exec->elements) > 0 & list_size(cola_ready->elements) > 0) {
+                if(!hay_exit && !pcb_desalojado) {
+                    pthread_mutex_lock(&mutex_exec);
+                    pcb * proceso = queue_peek(cola_exec);
+                    pthread_mutex_unlock(&mutex_exec);
+                    hay_interrupcion = true;
+                    send_interrupcion(proceso->pid, fd_cpu_interrupt);
+                    log_info(logger_kernel, "PID: %d - Desalojado por fin de Quantum", 
+                             proceso->pid);
+                } else {
+                    hay_exit = false;
+                }
+            }
+        }
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:508-472`
+
+### Priorities (Preemptive)
+
+```c
+pcb* obtenerSiguientePRIORIDADES() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    t_list* lista_ordenada = list_sorted(cola_ready->elements, cmp);
+    procesoPlanificado = list_remove(lista_ordenada, 0);
+    list_remove_element(cola_ready->elements, procesoPlanificado);
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+
+bool cmp(void *a, void *b) { 
+    pcb* pa = a;
+    pcb* pb = b;
+    int intA = pa->prioridad;
+    int intB = pb->prioridad; 
+    return intA < intB; // Lower value = higher priority
+}
+
+void controlar_interrupcion_prioridades() {
+    while(1) {
+        sem_wait(&control_interrupciones_prioridades);
+        cpu_disponible = false;
+        
+        if(list_size(cola_exec->elements) > 0 && list_size(cola_ready->elements) > 0) {
+            pthread_mutex_lock(&mutex_exec);
+            pcb * proceso = queue_peek(cola_exec);
+            pthread_mutex_unlock(&mutex_exec);
+            
+            t_list* lista_ordenada = list_sorted(cola_ready->elements, cmp);
+            int prioridadAComparar = ((pcb*)list_get(lista_ordenada, 0))->prioridad;
+            
+            if(hay_exit == false) {
+                if(prioridadAComparar < proceso->prioridad) {
+                    log_info(logger_kernel, "PID: %d - Desalojado por prioridad", 
+                             proceso->pid);
+                    hay_interrupcion = true;
+                    send_interrupcion(proceso->pid, fd_cpu_interrupt);
+                }
+            } else {
+                hay_exit = false;
+            }
+        }
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:517-497`
+
+## Resource Management
+
+### Resource Structure
+
+```c
+typedef struct {
+    char* recurso;
+    int instancias;
+    int encontrado;
+    t_queue* procesos;     // Processes using the resource
+    t_queue* bloqueados;   // Processes waiting for the resource
+    pthread_mutex_t mutex;
+} t_recurso;
+```
+
+Reference: `source/kernel/src/main.h:17-24`
+
+### WAIT Operation
+
+```c
+void manejar_wait(pcb* proceso, char* recurso) {
+    t_recurso* recursobuscado = buscar_recurso(recurso);
+    pcb * pcb_a_borrar = sacar_de_exec();
+    
+    if(recursobuscado->encontrado == -1) {
+        // Resource doesn't exist - terminate process
+        log_info(logger_kernel, "Finaliza el proceso: %d - Motivo: INVALID_RESOURCE",
+                 proceso->pid);
+        agregar_a_exit(proceso);
+        pcb_desalojado = false;
+        sem_post(&puedo_ejecutar_proceso);
+        send_terminar_proceso(proceso->pid, fd_memoria);  
+    } else {
+        pthread_mutex_lock(&recursobuscado->mutex);
+        recursobuscado->instancias--;
+        pthread_mutex_unlock(&recursobuscado->mutex);
+        
+        log_info(logger_kernel, "PID: %d - Wait: %s - Instancias: %d", 
+                 proceso->pid, recurso, recursobuscado->instancias);
+        
+        if(recursobuscado->instancias < 0) {   
+            // No instances available - block process
+            log_info(logger_kernel, "PID: %d - Bloqueado por: %s", 
+                     proceso->pid, recurso);
+            
+            pthread_mutex_lock(&recursobuscado->mutex);
+            queue_push(recursobuscado->bloqueados, proceso);
+            pthread_mutex_unlock(&recursobuscado->mutex);
+            
+            agregar_a_block(proceso);
+            detectar_deadlock_recurso();
+            sem_post(&puedo_ejecutar_proceso);
+        } else {
+            // Instance available - continue execution
+            pthread_mutex_lock(&recursobuscado->mutex);
+            queue_push((recursobuscado->procesos), proceso);
+            pthread_mutex_unlock(&recursobuscado->mutex);
+            
+            send_pcb(proceso, fd_cpu_dispatch);
+            agregar_a_exec(proceso);
+            sem_post(&control_interrupciones_rr);
+        }
+    }
+    pcb_destroyer(pcb_a_borrar);
+}
+```
+
+Reference: `source/kernel/src/main.c:540-582`
+
+### SIGNAL Operation
+
+```c
+void manejar_signal(pcb* proceso, char* recurso) {
+    t_recurso* recursobuscado = buscar_recurso(recurso);
+    pcb * pcb_a_borrar = sacar_de_exec();
+    
+    if(recursobuscado->encontrado == -1) {
+        log_info(logger_kernel, "Finaliza el proceso: %d - Motivo: INVALID_RESOURCE",
+                 proceso->pid);
+        agregar_a_exit(proceso);
+        sem_post(&puedo_ejecutar_proceso);
+        send_terminar_proceso(proceso->pid, fd_memoria);  
+    } else {
+        if(lista_contiene_id(recursobuscado->procesos->elements, proceso) == false) {
+            log_info(logger_kernel, "No hay instancias del recurso: %s asignadas al proceso", 
+                     recurso);
+            agregar_a_exit(proceso);
+            sem_post(&puedo_ejecutar_proceso);
+            send_terminar_proceso(proceso->pid, fd_memoria);  
+        } else {
+            pthread_mutex_lock(&recursobuscado->mutex);
+            recursobuscado->instancias++;
+            pthread_mutex_unlock(&recursobuscado->mutex);
+            
+            buscar_y_remover_pcb_cola(recursobuscado->procesos, proceso->pid, 
+                                     sem_no_usamos, recursobuscado->mutex);
+
+            log_info(logger_kernel, "PID: %d - Signal: %s - Instancias: %d", 
+                     proceso->pid, recurso, recursobuscado->instancias);
+            
+            if(recursobuscado->instancias <= 0) {
+                // Unblock a waiting process
+                pthread_mutex_lock(&recursobuscado->mutex);
+                pcb * procesoQuitadoBloqueados = queue_pop(recursobuscado->bloqueados);
+                queue_push(recursobuscado->procesos, procesoQuitadoBloqueados);
+                pthread_mutex_unlock(&recursobuscado->mutex);
+                
+                buscar_y_remover_pcb_cola(cola_block, procesoQuitadoBloqueados->pid, 
+                                         cantidad_block, mutex_block);
+                agregar_a_ready(procesoQuitadoBloqueados);
+                pcb_desalojado = false;
+            }
+            
+            agregar_a_exec(proceso);
+            send_pcb(proceso, fd_cpu_dispatch);
+            sem_post(&control_interrupciones_rr);
+        }
+    }
+    pcb_destroyer(pcb_a_borrar);
+}
+```
+
+Reference: `source/kernel/src/main.c:584-631`
+
+## File Management
+
+Kernel coordinates file operations with filesystem and manages file locks:
+
+### File Structure
+
+```c
+typedef struct {
+    char* nombre_archivo;
+    t_queue* bloqueados_archivo;
+    char* modo_apertura;  // "R" (Read) or "W" (Write)
+    int abierto_w;        // Write lock flag
+    int cant_abierto_r;   // Read lock counter
+    pthread_mutex_t mutex_archivo;
+} t_archivo;
+
+typedef struct {
+    char* nombre_archivo;
+    int puntero;          // File pointer position
+    char* modo_apertura;
+} t_archivo_proceso;
+```
+
+### F_OPEN - File Opening
+
+```c
+void ejecutar_f_open(char* nombre_archivo, char* modo_apertura, pcb* proceso) {
+    t_archivo* archivo = buscar_archivo_global(nombre_archivo);
+
+    if (archivo == NULL) {
+        // Create file if it doesn't exist
+        send_abrir_archivo(nombre_archivo, fd_filesystem);
+        int tamanio_archivo = recv_respuesta_abrir_archivo(fd_filesystem);
+        
+        if (tamanio_archivo == -1) {
+            send_crear_archivo(nombre_archivo, fd_filesystem);
+            op_code codigo = recibir_operacion(fd_filesystem);
+            recibir_mensaje(logger_kernel, fd_filesystem);
+        }
+        
+        archivo = crear_archivo_general(nombre_archivo);
+        list_add(archivos_abiertos, archivo);
+    }
+
+    if(strcmp(modo_apertura, "R") == 0) {
+        // Read mode - check for write lock
+        if(strcmp(archivo->modo_apertura, "W") == 0) {
+            // Block process - write lock active
+            log_info(logger_kernel, "PID: %d - Bloqueado por: %s", 
+                     proceso->pid, nombre_archivo);
+            sem_post(&puedo_ejecutar_proceso);
+            agregar_a_block(proceso);
+            
+            t_archivo_proceso *archivo_proceso = crear_archivo_proceso(nombre_archivo, 
+                                                                        modo_apertura);
+            list_add(proceso->archivos, archivo_proceso);
+            
+            t_proceso_bloqueado_archivo* proceso_bloqueado = 
+                malloc(sizeof(t_proceso_bloqueado_archivo));
+            proceso_bloqueado->pid = proceso->pid;
+            proceso_bloqueado->modo_apertura = modo_apertura;
+            
+            pthread_mutex_lock(&archivo->mutex_archivo);
+            queue_push(archivo->bloqueados_archivo, proceso_bloqueado);
+            pthread_mutex_unlock(&archivo->mutex_archivo);
+        } else {
+            // Open in read mode
+            t_archivo_proceso *archivo_proceso = crear_archivo_proceso(nombre_archivo, 
+                                                                        modo_apertura);
+            list_add(proceso->archivos, archivo_proceso);
+            archivo->modo_apertura = "R";
+            archivo->cant_abierto_r++;
+            agregar_a_exec(proceso);
+            send_pcb(proceso, fd_cpu_dispatch);
+        }
+    } else if(strcmp(modo_apertura, "W") == 0) {
+        // Write mode - check for any locks
+        if(strcmp(archivo->modo_apertura, "W") == 0 || 
+           strcmp(archivo->modo_apertura, "R") == 0) {
+            // Block process
+            // ... (similar to read blocking)
+        } else {
+            // Open in write mode
+            t_archivo_proceso *archivo_proceso = crear_archivo_proceso(nombre_archivo, 
+                                                                        modo_apertura);
+            list_add(proceso->archivos, archivo_proceso);
+            archivo->modo_apertura = "W";
+            agregar_a_exec(proceso);
+            send_pcb(proceso, fd_cpu_dispatch);
+        }
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:708-789`
+
+### Other File Operations
+
+- **F_TRUNCATE**: Resize file (blocks process)
+- **F_SEEK**: Update file pointer (non-blocking)
+- **F_READ**: Read from file (blocks process)
+- **F_WRITE**: Write to file (blocks process)
+- **F_CLOSE**: Close file and release locks
+
+## Console Commands
+
+Kernel provides interactive console commands:
+
+```c
+void * leer_consola(void * arg) {
+    while (1) {
+        char* comando = readline("Ingrese un comando: ");
+
+        char* token = strtok(comando, " ");
+        char* arg1 = strtok(NULL, " ");
+        char* arg2 = strtok(NULL, " ");
+        char* arg3 = strtok(NULL, " ");
+
+        if (strcmp(token, "INICIAR_PROCESO") == 0) {
+            iniciar_proceso(arg1, arg2, arg3);
+        } else if (strcmp(token, "FINALIZAR_PROCESO") == 0) {
+            finalizar_proceso(arg1);
+        } else if (strcmp(token, "DETENER_PLANIFICACION") == 0) {
+            detener_planificacion();
+        } else if (strcmp(token, "INICIAR_PLANIFICACION") == 0) {
+            iniciar_planificacion();
+        } else if (strcmp(token, "MULTIPROGRAMACION") == 0) {
+            cambiar_multiprogramacion(arg1);
+        } else if (strcmp(token, "PROCESO_ESTADO") == 0) {
+            proceso_estado();
+        }
+        
+        free(comando);
+    }
+}
+```
+
+Reference: `source/kernel/src/main.c:76-126`
+
+## Configuration
+
+```bash
+IP_MEMORIA=127.0.0.1
+PUERTO_MEMORIA=8002
+IP_CPU=127.0.0.1
+PUERTO_CPU_DISPATCH=8001
+PUERTO_CPU_INTERRUPT=8005
+IP_FILESYSTEM=127.0.0.1
+PUERTO_FILESYSTEM=8003
+ALGORITMO_PLANIFICACION=RR  # FIFO, RR, or PRIORIDADES
+QUANTUM=1000
+RECURSOS=[REC1,REC2,REC3]
+INSTANCIAS_RECURSOS=[2,3,1]
+GRADO_MULTIPROGRAMACION_INI=3
+```

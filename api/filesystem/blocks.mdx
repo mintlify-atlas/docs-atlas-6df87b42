@@ -1,0 +1,287 @@
+---
+title: 'Block Management API'
+description: 'Block allocation and I/O functions for the MAPPA OS filesystem'
+---
+
+## Overview
+
+The Block Management API provides functions for managing filesystem blocks, including initialization, allocation, deallocation, and read/write operations. Blocks are the fundamental storage units in the MAPPA OS filesystem.
+
+## Data Structures
+
+### BLOQUE
+
+```c
+typedef struct {
+    char* info;
+} BLOQUE;
+```
+
+Represents a block of data in the filesystem. Each block contains:
+- `info`: Pointer to the block's data (size determined by `tam_bloque` configuration)
+
+## Functions
+
+### iniciar_bloques
+
+```c
+bool iniciar_bloques(int tamano_bloques, bool* bitmapBloques, bool* bitmapSwap);
+```
+
+Initializes the blocks file and bitmaps for tracking block allocation.
+
+**Parameters:**
+- `tamano_bloques`: Size of each block in bytes (from `TAM_BLOQUE` configuration)
+- `bitmapBloques`: Bitmap array for regular file blocks (size: `cant_bloques_total - cant_bloques_swap`)
+- `bitmapSwap`: Bitmap array for swap blocks (size: `cant_bloques_swap`)
+
+**Returns:**
+- `true`: Blocks file initialized successfully
+- `false`: Error creating blocks file
+
+**Behavior:**
+- If blocks file exists:
+  - Reads all blocks to build bitmaps
+  - Counts free swap and file blocks
+  - Blocks marked as "0" are free, others are occupied
+  - Decrements `bloquesLibres` by 1 (block 0 reserved for boot)
+- If blocks file doesn't exist:
+  - Creates new file with all blocks initialized to "0"
+  - Sets `swapLibres = cant_bloques_swap`
+  - Sets `bloquesLibres = cant_bloques_total - cant_bloques_swap - 1`
+
+**Global Variables Updated:**
+- `swapLibres`: Number of free swap blocks
+- `bloquesLibres`: Number of free file blocks
+
+**Location:** `filesystem/src/main.c:169`
+
+---
+
+### reservarBloque
+
+```c
+void reservarBloque(uint32_t bloque, bool* bitmap);
+```
+
+Marks a block as occupied in the bitmap.
+
+**Parameters:**
+- `bloque`: Block number to reserve
+- `bitmap`: Bitmap array for tracking block allocation
+
+**Behavior:**
+- Sets `bitmap[bloque]` to 1 (occupied)
+- Decrements the global `bloquesLibres` counter
+- Does not write to disk (only updates in-memory bitmap)
+
+**Location:** `filesystem/src/main.c:249`
+
+---
+
+### liberarBloque
+
+```c
+void liberarBloque(FILE* f, uint32_t bloqueLib, bool* bitmap);
+```
+
+Frees a block by marking it as available and clearing its contents.
+
+**Parameters:**
+- `f`: Open FILE pointer to the blocks file (must be opened in `rb+` mode)
+- `bloqueLib`: Block number to free (relative to file blocks, not including swap)
+- `bitmap`: Bitmap array for tracking block allocation
+
+**Behavior:**
+- Adjusts block number to account for swap blocks (`bloqueLib + cant_bloques_swap`)
+- Seeks to the block's position in the file
+- Writes "0" to clear the block's contents
+- Sets `bitmap[bloqueLib]` to 0 (free)
+- Increments the global `bloquesLibres` counter
+- Logs the block access
+
+**Note:** This function does NOT apply the `retardo_acceso_bloque` delay (commented out in source).
+
+**Location:** `filesystem/src/main.c:255`
+
+---
+
+### buscarBloqueLibre
+
+```c
+uint32_t buscarBloqueLibre(bool* bitmap);
+```
+
+Searches for the first available free block.
+
+**Parameters:**
+- `bitmap`: Bitmap array for tracking block allocation
+
+**Returns:**
+- Block number of the first free block (>= 1)
+
+**Behavior:**
+- Starts search at block 1 (block 0 is reserved for boot)
+- Scans bitmap until finding a block marked as 0 (free)
+- Returns the block number
+- Does not modify the bitmap (caller must call `reservarBloque`)
+
+**Note:** Does not check if any blocks are available. Caller should verify `bloquesLibres > 0` before calling.
+
+**Location:** `filesystem/src/main.c:392`
+
+---
+
+### leer_bloque
+
+```c
+void* leer_bloque(int num_bloque);
+```
+
+Reads the contents of a block from disk.
+
+**Parameters:**
+- `num_bloque`: Block number to read (includes both swap and file blocks)
+
+**Returns:**
+- Pointer to allocated memory containing block data (caller must free)
+- `NULL`: Error opening blocks file
+
+**Behavior:**
+- Opens blocks file in read mode
+- Applies `retardo_acceso_bloque` delay (simulates disk access time)
+- Seeks to block position (`tam_bloque * num_bloque`)
+- Reads `tam_bloque` bytes into newly allocated memory
+- Logs access differently for swap blocks vs. file blocks:
+  - Swap blocks (`num_bloque < cant_bloques_swap`): "Acceso SWAP: X"
+  - File blocks: "ACCESO A BLOQUE NRO: X" (adjusted for swap offset)
+- Automatically closes the file
+
+**Location:** `filesystem/src/main.c:94`
+
+---
+
+### escribir_bloque
+
+```c
+char* escribir_bloque(int num_bloque, char* info);
+```
+
+Writes string data to a block on disk.
+
+**Parameters:**
+- `num_bloque`: Block number to write to
+- `info`: String data to write (must be less than or equal to `tam_bloque` bytes)
+
+**Returns:**
+- Pointer to the `info` string on success
+- `NULL`: Error opening blocks file
+
+**Behavior:**
+- Opens blocks file in `rb+` mode
+- Applies `retardo_acceso_bloque` delay (simulates disk access time)
+- Seeks to block position
+- Writes `tam_bloque` bytes from `info`
+- Logs access for swap blocks; file blocks have partial implementation
+- Automatically closes the file
+
+**Note:** This function has incomplete implementation for file blocks (see source line 147-150).
+
+**Location:** `filesystem/src/main.c:139`
+
+---
+
+### escribir_bloque_void
+
+```c
+void escribir_bloque_void(int num_bloque, void* info);
+```
+
+Writes raw binary data to a block on disk.
+
+**Parameters:**
+- `num_bloque`: Block number to write to
+- `info`: Pointer to binary data to write (must be >= `tam_bloque` bytes)
+
+**Behavior:**
+- Opens blocks file in `rb+` mode
+- Applies `retardo_acceso_bloque` delay (simulates disk access time)
+- Seeks to block position
+- Writes `tam_bloque` bytes from `info`
+- Logs differently for swap vs. file blocks:
+  - Swap blocks: "Acceso SWAP: X"
+  - File blocks: "ACCESO A BLOQUE X" (adjusted for swap offset)
+- Automatically closes the file
+
+**Location:** `filesystem/src/main.c:118`
+
+---
+
+## Block Numbering
+
+The MAPPA OS filesystem uses a specific block numbering scheme:
+
+- **Block 0**: Reserved for boot sector (always marked as occupied)
+- **Blocks 1 to `cant_bloques_swap - 1`**: Swap space blocks
+- **Blocks `cant_bloques_swap` to `cant_bloques_total - 1`**: Regular file blocks
+
+When accessing blocks:
+- Swap blocks are numbered from 0 to `cant_bloques_swap - 1`
+- File blocks are numbered from 0 to `(cant_bloques_total - cant_bloques_swap - 1)` in bitmaps
+- But stored at physical positions `cant_bloques_swap` to `cant_bloques_total - 1` in the blocks file
+
+## Usage Example
+
+```c
+// Initialize blocks and bitmaps
+bool* bitmapBloques = malloc(sizeof(bool) * (cant_bloques_total - cant_bloques_swap));
+bool* bitmapSwap = malloc(sizeof(bool) * cant_bloques_swap);
+inicializarBitMap(bitmapBloques, cant_bloques_total - cant_bloques_swap);
+inicializarBitMap(bitmapSwap, cant_bloques_swap);
+
+if (!iniciar_bloques(tam_bloque, bitmapBloques, bitmapSwap)) {
+    log_error(logger, "Error initializing blocks");
+}
+
+// Allocate a new block
+if (bloquesLibres > 0) {
+    uint32_t bloque = buscarBloqueLibre(bitmapBloques);
+    reservarBloque(bloque, bitmapBloques);
+    
+    // Write data to the block
+    char* data = "Hello, filesystem!";
+    escribir_bloque(bloque + cant_bloques_swap, data);
+}
+
+// Read block contents
+void* contenido = leer_bloque(bloque + cant_bloques_swap);
+printf("Block contains: %s\n", (char*)contenido);
+free(contenido);
+
+// Free the block
+FILE* f = fopen(path_bloques, "rb+");
+liberarBloque(f, bloque, bitmapBloques);
+fclose(f);
+```
+
+## Global Variables
+
+The Block Management API maintains these global counters:
+
+- `bloquesLibres`: Number of available file blocks
+- `swapLibres`: Number of available swap blocks
+
+## Related APIs
+
+- [FAT API](/api/filesystem/fat) - For managing file block chains
+- [Swap Space API](/api/filesystem/swap) - For swap-specific operations
+
+## Configuration
+
+The Block Management API uses the following configuration values:
+
+- `PATH_BLOQUES`: Path to the blocks file
+- `CANT_BLOQUES_TOTAL`: Total number of blocks in the filesystem
+- `CANT_BLOQUES_SWAP`: Number of blocks reserved for swap space
+- `TAM_BLOQUE`: Size of each block in bytes
+- `RETARDO_ACCESO_BLOQUE`: Delay in milliseconds for each block access (simulates disk latency)

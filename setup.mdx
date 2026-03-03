@@ -1,0 +1,508 @@
+---
+title: Setup Guide
+description: Install dependencies, configure, and run the MAPPA OS Simulator
+---
+
+# Setup Guide
+
+This guide will help you set up the MAPPA OS Simulator on your system. You'll install dependencies, build the modules, configure them, and run your first simulation.
+
+## Prerequisites
+
+### System Requirements
+
+- **Operating System**: Linux (tested on Ubuntu 20.04+)
+- **Compiler**: GCC 9.0 or higher
+- **Build Tools**: GNU Make
+- **Libraries**: SO Commons Library
+
+### Required Tools
+
+<Steps>
+  <Step title="Install GCC and Make">
+    ```bash
+    sudo apt update
+    sudo apt install build-essential
+    ```
+    
+    Verify installation:
+    ```bash
+    gcc --version  # Should be 9.0 or higher
+    make --version
+    ```
+  </Step>
+  
+  <Step title="Install SO Commons Library">
+    The SO Commons Library provides logging, configuration, and data structures:
+    
+    ```bash
+    git clone https://github.com/sisoputnfrba/so-commons-library
+    cd so-commons-library
+    make debug
+    sudo make install
+    ```
+    
+    This installs the library to `/usr/lib/libcommons.so` and headers to `/usr/include/commons/`.
+  </Step>
+  
+  <Step title="Install Development Headers">
+    ```bash
+    sudo apt install libreadline-dev  # For kernel console
+    ```
+  </Step>
+</Steps>
+
+<Note>
+**SO Commons Library** is required for all modules. It provides `t_log`, `t_config`, `t_list`, `t_queue`, and other essential types used throughout MAPPA OS.
+</Note>
+
+## Clone the Repository
+
+```bash
+git clone https://github.com/jraijman/tp-so-mappa-2c-2023.git
+cd tp-so-mappa-2c-2023
+```
+
+The repository structure:
+```
+tp-so-mappa-2c-2023/
+├── cpu/           # CPU module
+├── memoria/       # Memory module
+├── kernel/        # Kernel module
+├── filesystem/    # Filesystem module
+└── utils/         # Shared protocol and socket code
+```
+
+## Build the System
+
+### Build All Modules
+
+Each module has its own makefile. Build them in dependency order:
+
+<Tabs>
+  <Tab title="Build Utils First">
+    Utils provides shared protocol and socket code:
+    ```bash
+    cd utils
+    make debug
+    cd ..
+    ```
+    
+    This creates `utils/bin/libutils.a` used by other modules.
+  </Tab>
+  
+  <Tab title="Build Individual Modules">
+    Build each module with debug symbols:
+    
+    ```bash
+    # Filesystem
+    cd filesystem
+    make debug
+    cd ..
+    
+    # Memory
+    cd memoria
+    make debug
+    cd ..
+    
+    # CPU
+    cd cpu
+    make debug
+    cd ..
+    
+    # Kernel
+    cd kernel
+    make debug
+    cd ..
+    ```
+  </Tab>
+  
+  <Tab title="Build Script">
+    Or build all at once with a script:
+    
+    ```bash
+    #!/bin/bash
+    for module in utils filesystem memoria cpu kernel; do
+        echo "Building $module..."
+        cd $module
+        make debug
+        cd ..
+    done
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+**Debug vs Release**: Use `make debug` for development (includes symbols for debugging) and `make release` for optimized production builds. See [Build System](/development/building) for details.
+</Info>
+
+### Verify Build
+
+Check that binaries were created:
+
+```bash
+ls -lh cpu/bin/cpu.out
+ls -lh memoria/bin/memoria.out
+ls -lh kernel/bin/kernel.out
+ls -lh filesystem/bin/filesystem.out
+```
+
+Each should be several hundred KB in size.
+
+## Configuration
+
+Each module needs a configuration file. Sample configurations are provided in each `config/` directory.
+
+### Configuration Files
+
+<AccordionGroup>
+  <Accordion title="CPU Configuration (cpu/config/cpu.config)">
+    ```ini
+    IP_MEMORIA=127.0.0.1
+    PUERTO_MEMORIA=8002
+    PUERTO_ESCUCHA_DISPATCH=8006
+    PUERTO_ESCUCHA_INTERRUPT=8007
+    ```
+    
+    - **IP_MEMORIA**: Memory module address
+    - **PUERTO_MEMORIA**: Memory module port
+    - **PUERTO_ESCUCHA_DISPATCH**: Port for receiving PCBs from Kernel
+    - **PUERTO_ESCUCHA_INTERRUPT**: Port for receiving interrupts from Kernel
+    
+    See [CPU Configuration](/configuration/cpu-config) for details.
+  </Accordion>
+  
+  <Accordion title="Memory Configuration (memoria/config/base.config)">
+    ```ini
+    PUERTO_ESCUCHA=8002
+    IP_FILESYSTEM=127.0.0.1
+    PUERTO_FILESYSTEM=8003
+    TAM_MEMORIA=4096
+    TAM_PAGINA=16
+    PATH_INSTRUCCIONES=./mappa-pruebas
+    RETARDO_RESPUESTA=1000
+    ALGORITMO_REEMPLAZO=FIFO
+    ```
+    
+    - **TAM_MEMORIA**: Total memory size in bytes (4096 = 256 frames × 16 bytes)
+    - **TAM_PAGINA**: Page/frame size (must divide TAM_MEMORIA evenly)
+    - **PATH_INSTRUCCIONES**: Directory containing process instruction files
+    - **ALGORITMO_REEMPLAZO**: `FIFO` or `LRU`
+    
+    See [Memory Configuration](/configuration/memory-config) for details.
+  </Accordion>
+  
+  <Accordion title="Kernel Configuration (kernel/config/base.config)">
+    ```ini
+    IP_MEMORIA=127.0.0.1
+    PUERTO_MEMORIA=8002
+    IP_CPU=127.0.0.1
+    PUERTO_CPU_DISPATCH=8006
+    PUERTO_CPU_INTERRUPT=8007
+    IP_FILESYSTEM=127.0.0.1
+    PUERTO_FILESYSTEM=8003
+    ALGORITMO_PLANIFICACION=FIFO
+    QUANTUM=3000
+    RECURSOS=[SEM1,SEM2]
+    INSTANCIAS_RECURSOS=[1,2]
+    GRADO_MULTIPROGRAMACION_INI=3
+    ```
+    
+    - **ALGORITMO_PLANIFICACION**: `FIFO`, `RR` (Round Robin), or `PRIORIDADES`
+    - **QUANTUM**: Time slice in milliseconds (for Round Robin)
+    - **RECURSOS**: Resource names (comma-separated, no spaces)
+    - **INSTANCIAS_RECURSOS**: Initial instances for each resource
+    - **GRADO_MULTIPROGRAMACION_INI**: Max processes in READY/EXEC/BLOCK
+    
+    See [Kernel Configuration](/configuration/kernel-config) for details.
+  </Accordion>
+  
+  <Accordion title="Filesystem Configuration (filesystem/config/base.config)">
+    ```ini
+    IP_MEMORIA=127.0.0.1
+    PUERTO_MEMORIA=8002
+    PUERTO_ESCUCHA=8003
+    PATH_FAT=./fs/fat.dat
+    PATH_BLOQUES=./fs/bloques.dat
+    PATH_FCB=./fs/fcb
+    CANT_BLOQUES_TOTAL=1024
+    CANT_BLOQUES_SWAP=256
+    TAM_BLOQUE=16
+    RETARDO_ACCESO_BLOQUE=1000
+    RETARDO_ACCESO_FAT=500
+    ```
+    
+    - **CANT_BLOQUES_TOTAL**: Total blocks (swap + data)
+    - **CANT_BLOQUES_SWAP**: Blocks reserved for Memory's swap space
+    - **TAM_BLOQUE**: Block size (should match TAM_PAGINA in Memory)
+    
+    See [Filesystem Configuration](/configuration/filesystem-config) for details.
+  </Accordion>
+</AccordionGroup>
+
+### Create Instruction Files
+
+Memory needs instruction files for processes. Create a directory and sample programs:
+
+```bash
+mkdir -p memoria/mappa-pruebas
+```
+
+Create a sample instruction file `memoria/mappa-pruebas/PRUEBA.txt`:
+
+```
+SET AX 10
+SET BX 5
+SUM AX BX
+MOV_OUT 0 AX
+EXIT
+```
+
+Each line is one instruction. The CPU will execute them sequentially.
+
+### Create Filesystem Directories
+
+```bash
+mkdir -p filesystem/fs/fcb
+```
+
+The Filesystem will create `fat.dat` and `bloques.dat` automatically on first run.
+
+## Running MAPPA OS
+
+Modules must be started in a specific order. Open 4 terminal windows:
+
+<Steps>
+  <Step title="Terminal 1: Start Filesystem">
+    ```bash
+    cd filesystem
+    make start ARGS="config/base.config"
+    ```
+    
+    You should see:
+    ```
+    [FILESYSTEM:] FAT iniciada correctamente
+    [FILESYSTEM:] Archivo de bloques iniciado correctamente: SWAP LIBRE 256, BLOQUES LIBRES 767
+    ```
+    
+    The Filesystem is now waiting for connections.
+    
+    *Source: filesystem/src/main.c:568-594*
+  </Step>
+  
+  <Step title="Terminal 2: Start Memory">
+    ```bash
+    cd memoria
+    make start ARGS="config/base.config"
+    ```
+    
+    You should see:
+    ```
+    [MEMORIA:] Config cargada
+    [MEMORIA:] Me llegó el mensaje: CONECTATE
+    ```
+    
+    Memory connected to Filesystem and is now waiting for CPU/Kernel.
+    
+    *Source: memoria/src/main.c:19-47*
+  </Step>
+  
+  <Step title="Terminal 3: Start CPU">
+    ```bash
+    cd cpu
+    make start ARGS="config/cpu.config"
+    ```
+    
+    You should see:
+    ```
+    [CPU:] Tamaño de página: 16
+    [CPU:] Me llegó el mensaje: soy Kernel
+    ```
+    
+    CPU connected to Memory and is waiting for Kernel to send processes.
+    
+    *Source: cpu/src/main.c:3-38*
+  </Step>
+  
+  <Step title="Terminal 4: Start Kernel">
+    ```bash
+    cd kernel
+    make start ARGS="config/base.config"
+    ```
+    
+    You should see:
+    ```
+    [KERNEL:] INICIO DE PLANIFICACIÓN
+    Ingrese un comando:
+    ```
+    
+    The system is now fully operational!
+    
+    *Source: kernel/src/main.c:3-44*
+  </Step>
+</Steps>
+
+<Warning>
+**Startup Order is Critical**: Modules must be started in this order (Filesystem → Memory → CPU → Kernel) because each module acts as a client to the previous ones. Starting out of order will result in connection failures.
+
+From **source/README.md**:
+```
+Pasos para levantar modulos:
+ * 1- filesystem
+ * 2- memoria
+ * 3- cpu
+ * 4- kernel
+```
+</Warning>
+
+## Create Your First Process
+
+With all modules running, use the Kernel console to create a process:
+
+```bash
+# In the Kernel terminal
+INICIAR_PROCESO PRUEBA.txt 1024 5
+```
+
+- **PRUEBA.txt**: Instruction file (in `PATH_INSTRUCCIONES` directory)
+- **1024**: Process size in bytes (64 pages × 16 bytes)
+- **5**: Priority (lower = higher priority, used in PRIORIDADES algorithm)
+
+You should see:
+```
+[KERNEL:] Se crea el proceso 1 en NEW
+[KERNEL:] Cola Ready FIFO: [1]
+[CPU:] PID: 1 - FETCH - Program Counter: 0
+[CPU:] PID: 1 - Ejecutando: SET - AX 10
+[CPU:] PID: 1 - FETCH - Program Counter: 1
+[CPU:] PID: 1 - Ejecutando: SET - BX 5
+...
+[KERNEL:] Finaliza el proceso 1 - Motivo: SUCCESS
+```
+
+The process executed all instructions and terminated successfully!
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Connection Refused">
+    **Symptom**: `Connection refused` or `Failed to connect`
+    
+    **Cause**: Target module not running or wrong port
+    
+    **Solution**: 
+    - Verify target module is running
+    - Check IP and port in config files match
+    - Ensure firewall allows localhost connections
+  </Accordion>
+  
+  <Accordion title="Shared Library Not Found">
+    **Symptom**: `error while loading shared libraries: libcommons.so`
+    
+    **Cause**: SO Commons Library not installed
+    
+    **Solution**:
+    ```bash
+    cd so-commons-library
+    sudo make install
+    sudo ldconfig  # Refresh library cache
+    ```
+  </Accordion>
+  
+  <Accordion title="Instruction File Not Found">
+    **Symptom**: `No se pudo abrir el archivo de instrucciones`
+    
+    **Cause**: Instruction file missing or wrong PATH_INSTRUCCIONES
+    
+    **Solution**:
+    - Verify file exists: `ls memoria/mappa-pruebas/PRUEBA.txt`
+    - Check PATH_INSTRUCCIONES in memory config
+    - Use absolute paths if relative paths fail
+  </Accordion>
+  
+  <Accordion title="Segmentation Fault">
+    **Symptom**: Module crashes with `Segmentation fault`
+    
+    **Cause**: Memory error (null pointer, buffer overflow, use-after-free)
+    
+    **Solution**: Run with valgrind:
+    ```bash
+    cd <module>
+    make memcheck ARGS="config/base.config"
+    ```
+    
+    See [Debugging Guide](/development/debugging) for details.
+  </Accordion>
+</AccordionGroup>
+
+## Verification
+
+To verify your setup is working correctly:
+
+<Tabs>
+  <Tab title="Process Execution">
+    Create a process and verify it completes:
+    ```bash
+    # In Kernel console
+    INICIAR_PROCESO PRUEBA.txt 1024 5
+    ```
+    
+    Look for `Finaliza el proceso X - Motivo: SUCCESS` in Kernel logs.
+  </Tab>
+  
+  <Tab title="Memory Management">
+    Create a large process to trigger paging:
+    ```bash
+    # Create process larger than physical memory
+    INICIAR_PROCESO BIG.txt 8192 5
+    ```
+    
+    Look for `PAGE FAULT` and `REEMPLAZO` messages in Memory logs.
+  </Tab>
+  
+  <Tab title="Scheduling">
+    Test different scheduling algorithms by changing `ALGORITMO_PLANIFICACION` in kernel config:
+    - `FIFO`: Non-preemptive, first come first served
+    - `RR`: Preemptive with quantum
+    - `PRIORIDADES`: Preemptive by priority
+    
+    Create multiple processes and observe execution order.
+  </Tab>
+  
+  <Tab title="File Operations">
+    Create an instruction file with F_OPEN, F_WRITE, F_READ:
+    ```
+    F_OPEN archivo.txt W
+    MOV_OUT 0 AX
+    F_WRITE archivo.txt 0
+    F_CLOSE archivo.txt
+    EXIT
+    ```
+    
+    Verify file operations succeed without errors.
+  </Tab>
+</Tabs>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration Guide" icon="gear" href="/configuration/kernel-config">
+    Learn about all configuration parameters
+  </Card>
+  
+  <Card title="Console Commands" icon="terminal" href="/api/kernel/console-commands">
+    Explore all Kernel console commands
+  </Card>
+  
+  <Card title="CPU Instructions" icon="microchip" href="/api/cpu/instructions">
+    Write programs with the full instruction set
+  </Card>
+  
+  <Card title="Development Guide" icon="code" href="/development/building">
+    Build, test, and debug MAPPA OS
+  </Card>
+</CardGroup>
+
+<Tip>
+Start with simple instruction files (5-10 instructions) to verify basic operation, then gradually increase complexity with loops, file I/O, and resource synchronization.
+</Tip>

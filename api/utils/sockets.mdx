@@ -1,0 +1,559 @@
+---
+title: 'Socket API'
+description: 'Network socket management for MAPPA OS module communication'
+---
+
+The Socket API provides functions for creating client-server connections between different modules of the MAPPA OS simulator. These functions handle TCP socket creation, server initialization, client connections, and connection cleanup.
+
+## Overview
+
+The MAPPA OS simulator uses TCP sockets for inter-process communication between modules:
+
+- **Kernel**: Central coordinator and scheduler
+- **Memory**: Memory and swap management
+- **CPU**: Instruction execution
+- **Filesystem**: File operations
+
+Each module can act as either a server (accepting connections) or a client (initiating connections).
+
+## Functions
+
+### crear_conexion
+
+Creates a client socket connection to a server.
+
+```c
+int crear_conexion(t_log* logger, const char* server_name, char* ip, char* puerto);
+```
+
+**Parameters:**
+- `logger`: Logger instance for connection status messages
+- `server_name`: Descriptive name of the server (used in log messages)
+- `ip`: IP address of the server (e.g., "127.0.0.1" or "192.168.1.100")
+- `puerto`: Port number as a string (e.g., "8080")
+
+**Returns:**
+- Socket file descriptor on success (positive integer)
+- `0` on failure (socket creation error or connection refused)
+
+**Description:**
+Creates a TCP socket and connects to the specified server. The function uses `getaddrinfo()` for address resolution, supporting both IPv4 and IPv6. Connection errors are logged using the provided logger.
+
+**Example:**
+```c
+t_log* logger = log_create("cpu.log", "CPU", true, LOG_LEVEL_INFO);
+
+int socket_memoria = crear_conexion(logger, "MEMORIA", "127.0.0.1", "8002");
+if (socket_memoria == 0) {
+    log_error(logger, "Failed to connect to Memory module");
+    return EXIT_FAILURE;
+}
+
+log_info(logger, "Successfully connected to Memory module");
+```
+
+**Error Handling:**
+- Returns `0` if socket creation fails (invalid parameters, system limits)
+- Returns `0` if connection is refused (server not running, wrong port)
+- Logs error messages using the provided logger
+- Frees address info structures before returning
+
+### iniciar_servidor
+
+Initializes a server socket and begins listening for connections.
+
+```c
+int iniciar_servidor(t_log* logger, char* ip, char* puerto, char* nombre);
+```
+
+**Parameters:**
+- `logger`: Logger instance for server status messages
+- `ip`: IP address to bind to (use `NULL` or "0.0.0.0" for all interfaces)
+- `puerto`: Port number as a string (e.g., "8001")
+- `nombre`: Descriptive name for the server (used in log messages)
+
+**Returns:**
+- Server socket file descriptor (positive integer)
+
+**Description:**
+Creates a TCP server socket, binds it to the specified address and port, and begins listening for incoming connections. The function uses `SO_REUSEADDR` to allow immediate socket reuse after the server restarts. The listen backlog is set to `SOMAXCONN` (system maximum).
+
+**Example:**
+```c
+t_log* logger = log_create("kernel.log", "KERNEL", true, LOG_LEVEL_INFO);
+t_config* config = config_create("kernel.config");
+
+char* ip = config_get_string_value(config, "IP_ESCUCHA");
+char* puerto = config_get_string_value(config, "PUERTO_ESCUCHA");
+
+int socket_servidor = iniciar_servidor(logger, ip, puerto, "KERNEL");
+log_info(logger, "Server initialized on %s:%s", ip, puerto);
+
+// Server is now ready to accept connections
+while (1) {
+    int cliente = esperar_cliente(logger, "NEW_CONNECTION", socket_servidor);
+    // Handle client connection...
+}
+```
+
+**Socket Options:**
+- `SO_REUSEADDR`: Allows binding to a port immediately after the server is restarted, even if connections are in TIME_WAIT state
+
+**Network Configuration:**
+- IPv4 (`AF_INET`): Standard IPv4 addressing
+- `SOCK_STREAM`: TCP connection-oriented protocol
+- `AI_PASSIVE`: Socket will be used for server binding
+
+### esperar_cliente
+
+Accepts an incoming client connection.
+
+```c
+int esperar_cliente(t_log* logger, const char* name, int socket_servidor);
+```
+
+**Parameters:**
+- `logger`: Logger instance for client connection messages
+- `name`: Descriptive name for the connection (used in log messages)
+- `socket_servidor`: Server socket file descriptor returned by `iniciar_servidor()`
+
+**Returns:**
+- Client socket file descriptor (positive integer)
+
+**Description:**
+Blocks until a client connects to the server socket, then accepts the connection and returns a new socket for communicating with that client. This is a blocking call that will wait indefinitely for a connection.
+
+**Example:**
+```c
+t_log* logger = log_create("memoria.log", "MEMORIA", true, LOG_LEVEL_INFO);
+int socket_servidor = iniciar_servidor(logger, NULL, "8002", "MEMORIA");
+
+while (1) {
+    int socket_cpu = esperar_cliente(logger, "CPU", socket_servidor);
+    
+    // Handle CPU requests in a separate thread
+    pthread_t thread;
+    pthread_create(&thread, NULL, atender_cpu, (void*)socket_cpu);
+    pthread_detach(thread);
+}
+```
+
+**Multi-client Handling:**
+```c
+void* atender_cliente(void* socket_ptr) {
+    int socket_cliente = (int)socket_ptr;
+    
+    while (1) {
+        int cod_op = recibir_operacion(socket_cliente);
+        if (cod_op == -1) {
+            log_warning(logger, "Client disconnected");
+            liberar_conexion(socket_cliente);
+            return NULL;
+        }
+        
+        // Process operation...
+    }
+}
+
+int main() {
+    int socket_servidor = iniciar_servidor(logger, NULL, "8001", "KERNEL");
+    
+    while (1) {
+        int socket_cliente = esperar_cliente(logger, "NEW_CLIENT", socket_servidor);
+        
+        pthread_t thread;
+        pthread_create(&thread, NULL, atender_cliente, (void*)socket_cliente);
+        pthread_detach(thread);
+    }
+}
+```
+
+### liberar_conexion
+
+Closes a socket connection and releases its resources.
+
+```c
+void liberar_conexion(int socket_cliente);
+```
+
+**Parameters:**
+- `socket_cliente`: Socket file descriptor to close
+
+**Description:**
+Closes the socket connection and sets the socket descriptor to -1. This function should be called when:
+- A client disconnects (detected by `recibir_operacion()` returning -1)
+- The module is shutting down
+- An error occurs on the connection
+
+**Example:**
+```c
+int socket_memoria = crear_conexion(logger, "MEMORIA", "127.0.0.1", "8002");
+
+// Use the connection...
+send_pcb(proceso, socket_memoria);
+
+// Clean up when done
+liberar_conexion(socket_memoria);
+log_info(logger, "Connection to Memory closed");
+```
+
+**Graceful Shutdown:**
+```c
+void shutdown_module() {
+    log_info(logger, "Shutting down module...");
+    
+    // Close all client connections
+    for (int i = 0; i < num_connections; i++) {
+        liberar_conexion(client_sockets[i]);
+    }
+    
+    // Close server socket
+    close(socket_servidor);
+    
+    log_destroy(logger);
+}
+```
+
+## Usage Examples
+
+### Client Module (CPU connecting to Memory)
+
+```c
+#include "sockets.h"
+#include "protocolo.h"
+
+int main(void) {
+    t_log* logger = log_create("cpu.log", "CPU", true, LOG_LEVEL_INFO);
+    t_config* config = config_create("cpu.config");
+    
+    char* ip_memoria = config_get_string_value(config, "IP_MEMORIA");
+    char* puerto_memoria = config_get_string_value(config, "PUERTO_MEMORIA");
+    
+    // Connect to Memory module
+    int socket_memoria = crear_conexion(logger, "MEMORIA", ip_memoria, puerto_memoria);
+    
+    if (socket_memoria == 0) {
+        log_error(logger, "Could not connect to Memory. Exiting...");
+        return EXIT_FAILURE;
+    }
+    
+    // Send a message to identify this module
+    enviar_mensaje("CPU", socket_memoria);
+    
+    // Request page size
+    int cod_op = recibir_operacion(socket_memoria);
+    if (cod_op == TAMANIO_PAGINA) {
+        int tam_pagina = recv_tam_pagina(socket_memoria);
+        log_info(logger, "Page size: %d bytes", tam_pagina);
+    }
+    
+    // Use the connection...
+    
+    // Clean up
+    liberar_conexion(socket_memoria);
+    config_destroy(config);
+    log_destroy(logger);
+    
+    return EXIT_SUCCESS;
+}
+```
+
+### Server Module (Kernel accepting connections)
+
+```c
+#include "sockets.h"
+#include "protocolo.h"
+
+typedef struct {
+    int socket;
+    char* nombre;
+} t_conexion;
+
+void* atender_cpu(void* arg) {
+    t_conexion* conexion = (t_conexion*)arg;
+    
+    log_info(logger, "Attending CPU connection");
+    
+    while (1) {
+        int cod_op = recibir_operacion(conexion->socket);
+        
+        if (cod_op == -1) {
+            log_warning(logger, "CPU disconnected");
+            break;
+        }
+        
+        switch(cod_op) {
+            case PCB_INTERRUPCION:
+                pcb* proceso;
+                char* motivo;
+                recv_pcbDesalojado(conexion->socket, &proceso, &motivo);
+                log_info(logger, "Process %d interrupted", proceso->pid);
+                // Handle interrupt...
+                break;
+                
+            case PCB_EXIT:
+                // Handle process exit...
+                break;
+        }
+    }
+    
+    liberar_conexion(conexion->socket);
+    free(conexion->nombre);
+    free(conexion);
+    
+    return NULL;
+}
+
+int main(void) {
+    t_log* logger = log_create("kernel.log", "KERNEL", true, LOG_LEVEL_INFO);
+    t_config* config = config_create("kernel.config");
+    
+    char* ip = config_get_string_value(config, "IP_ESCUCHA");
+    char* puerto_cpu = config_get_string_value(config, "PUERTO_CPU_DISPATCH");
+    
+    // Initialize server
+    int socket_servidor = iniciar_servidor(logger, ip, puerto_cpu, "KERNEL-CPU");
+    
+    // Accept connections in a loop
+    while (1) {
+        int socket_cpu = esperar_cliente(logger, "CPU", socket_servidor);
+        
+        // Create connection info
+        t_conexion* conexion = malloc(sizeof(t_conexion));
+        conexion->socket = socket_cpu;
+        conexion->nombre = strdup("CPU");
+        
+        // Handle in a separate thread
+        pthread_t thread;
+        pthread_create(&thread, NULL, atender_cpu, conexion);
+        pthread_detach(thread);
+    }
+    
+    close(socket_servidor);
+    config_destroy(config);
+    log_destroy(logger);
+    
+    return EXIT_SUCCESS;
+}
+```
+
+### Multi-connection Module (Memory serving CPU and Kernel)
+
+```c
+#include "sockets.h"
+#include "protocolo.h"
+
+void* atender_kernel(void* socket_ptr) {
+    int socket_kernel = (int)socket_ptr;
+    
+    while (1) {
+        int cod_op = recibir_operacion(socket_kernel);
+        if (cod_op == -1) break;
+        
+        switch(cod_op) {
+            case INICIALIZAR_PROCESO:
+                // Initialize process memory...
+                break;
+            case FINALIZAR_PROCESO:
+                // Free process memory...
+                break;
+        }
+    }
+    
+    liberar_conexion(socket_kernel);
+    return NULL;
+}
+
+void* atender_cpu(void* socket_ptr) {
+    int socket_cpu = (int)socket_ptr;
+    
+    while (1) {
+        int cod_op = recibir_operacion(socket_cpu);
+        if (cod_op == -1) break;
+        
+        switch(cod_op) {
+            case PEDIDO_MARCO:
+                int pid, pagina;
+                recv_pedido_marco(socket_cpu, &pid, &pagina);
+                int marco = obtener_marco(pid, pagina);
+                send_marco(socket_cpu, marco);
+                break;
+        }
+    }
+    
+    liberar_conexion(socket_cpu);
+    return NULL;
+}
+
+int main(void) {
+    t_log* logger = log_create("memoria.log", "MEMORIA", true, LOG_LEVEL_INFO);
+    t_config* config = config_create("memoria.config");
+    
+    char* ip = config_get_string_value(config, "IP_ESCUCHA");
+    char* puerto_kernel = config_get_string_value(config, "PUERTO_KERNEL");
+    char* puerto_cpu = config_get_string_value(config, "PUERTO_CPU");
+    
+    // Initialize two servers
+    int servidor_kernel = iniciar_servidor(logger, ip, puerto_kernel, "MEMORIA-KERNEL");
+    int servidor_cpu = iniciar_servidor(logger, ip, puerto_cpu, "MEMORIA-CPU");
+    
+    // Accept kernel connections in a thread
+    pthread_t thread_kernel;
+    pthread_create(&thread_kernel, NULL, aceptar_kernel, (void*)servidor_kernel);
+    pthread_detach(thread_kernel);
+    
+    // Accept CPU connections in main thread
+    while (1) {
+        int socket_cpu = esperar_cliente(logger, "CPU", servidor_cpu);
+        
+        pthread_t thread;
+        pthread_create(&thread, NULL, atender_cpu, (void*)socket_cpu);
+        pthread_detach(thread);
+    }
+    
+    return EXIT_SUCCESS;
+}
+```
+
+## Connection Architecture
+
+Typical MAPPA OS connection topology:
+
+```
+┌──────────┐
+│  KERNEL  │ (Server on multiple ports)
+└────┬─────┘
+     │
+     ├─────► CPU_DISPATCH (port 8001)
+     ├─────► CPU_INTERRUPT (port 8002)  
+     └─────► FILESYSTEM (port 8003)
+          
+┌──────────┐
+│  MEMORY  │ (Server on multiple ports)
+└────┬─────┘
+     │
+     ├─────► KERNEL (port 8004)
+     └─────► CPU (port 8005)
+
+┌──────────┐
+│   CPU    │ (Client to Memory and Kernel)
+└────┬─────┘
+     │
+     ├─────► connects to KERNEL:8001
+     └─────► connects to MEMORY:8005
+
+┌──────────┐
+│FILESYSTEM│ (Server on one port)
+└────┬─────┘
+     │
+     └─────► KERNEL (port 8006)
+```
+
+## Error Handling
+
+### Connection Failures
+
+```c
+int socket_memoria = crear_conexion(logger, "MEMORIA", ip, puerto);
+
+if (socket_memoria == 0) {
+    log_error(logger, "Failed to connect to Memory module");
+    log_error(logger, "Check that:");
+    log_error(logger, "  1. Memory module is running");
+    log_error(logger, "  2. IP and port are correct: %s:%s", ip, puerto);
+    log_error(logger, "  3. No firewall is blocking the connection");
+    
+    return EXIT_FAILURE;
+}
+```
+
+### Disconnection Detection
+
+```c
+while (1) {
+    int cod_op = recibir_operacion(socket_cliente);
+    
+    if (cod_op == -1) {
+        log_warning(logger, "Client disconnected or connection error");
+        liberar_conexion(socket_cliente);
+        break;
+    }
+    
+    // Process operation...
+}
+```
+
+### Retry Logic
+
+```c
+int conectar_con_reintentos(t_log* logger, char* ip, char* puerto, int max_intentos) {
+    int socket = 0;
+    
+    for (int i = 0; i < max_intentos && socket == 0; i++) {
+        log_info(logger, "Connection attempt %d/%d", i + 1, max_intentos);
+        
+        socket = crear_conexion(logger, "MEMORIA", ip, puerto);
+        
+        if (socket == 0 && i < max_intentos - 1) {
+            log_warning(logger, "Connection failed, retrying in 2 seconds...");
+            sleep(2);
+        }
+    }
+    
+    return socket;
+}
+```
+
+## Thread Safety
+
+The socket functions themselves are thread-safe, but you must ensure:
+
+1. **One socket per thread**: Don't share a socket descriptor between threads without synchronization
+2. **Serialize access**: If multiple threads need to use the same socket, use mutexes
+
+```c
+pthread_mutex_t mutex_socket_memoria;
+
+void enviar_sincronizado(void* data, int size) {
+    pthread_mutex_lock(&mutex_socket_memoria);
+    send(socket_memoria, data, size, 0);
+    pthread_mutex_unlock(&mutex_socket_memoria);
+}
+```
+
+## Best Practices
+
+1. **Always check return values**: `crear_conexion()` returns 0 on failure
+2. **Use descriptive names**: Pass meaningful names to logging functions
+3. **Clean up resources**: Call `liberar_conexion()` when done
+4. **Handle disconnections**: Check for -1 from `recibir_operacion()`
+5. **Use configuration files**: Don't hardcode IPs and ports
+6. **Implement retry logic**: Network connections can fail temporarily
+7. **Use threads for multiple clients**: Don't block the server on one client
+8. **Set SO_REUSEADDR**: Already done in `iniciar_servidor()` for quick restarts
+
+## Configuration Example
+
+Typical configuration file for socket parameters:
+
+```ini
+# kernel.config
+IP_ESCUCHA=127.0.0.1
+PUERTO_CPU_DISPATCH=8001
+PUERTO_CPU_INTERRUPT=8002
+
+IP_MEMORIA=127.0.0.1
+PUERTO_MEMORIA=8004
+
+IP_FILESYSTEM=127.0.0.1
+PUERTO_FILESYSTEM=8006
+```
+
+```c
+t_config* config = config_create("kernel.config");
+
+char* ip_escucha = config_get_string_value(config, "IP_ESCUCHA");
+char* puerto_dispatch = config_get_string_value(config, "PUERTO_CPU_DISPATCH");
+
+int servidor_dispatch = iniciar_servidor(logger, ip_escucha, puerto_dispatch, "DISPATCH");
+```

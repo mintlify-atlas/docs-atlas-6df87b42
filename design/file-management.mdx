@@ -1,0 +1,666 @@
+---
+title: 'File Management Design'
+description: 'FAT filesystem implementation, block allocation, file operations, and FCB structure'
+---
+
+## Overview
+
+The MAPPA OS filesystem implements a **FAT (File Allocation Table)** based file system with support for file creation, truncation (expand/shrink), and block-level I/O operations. It also manages a **swap space** for virtual memory.
+
+## File System Structure
+
+### Configuration
+
+```c:filesystem/src/main.c
+char* path_fat;              // Path to FAT file
+char* path_bloques;          // Path to data blocks file
+char* path_fcb;              // Path to FCB directory
+int cant_bloques_total;      // Total number of blocks
+int cant_bloques_swap;       // Blocks reserved for swap
+int tam_bloque;              // Block size (typically 1024 bytes)
+int retardo_acceso_bloque;   // Block access delay (ms)
+int retardo_acceso_fat;      // FAT access delay (ms)
+```
+
+### Key Data Structures
+
+**FAT Entry:**
+```c:filesystem/src/main.h
+typedef struct {
+    uint32_t entrada_FAT;  // Next block number or EOF marker
+} FAT;
+```
+
+**File Control Block (FCB):**
+```c:filesystem/src/main.h
+typedef struct {
+    char* nombre_archivo;   // File name
+    int tamanio_archivo;    // File size in bytes
+    int bloque_inicial;     // First block number
+} FCB;
+```
+
+**Block:**
+```c:filesystem/src/main.h
+typedef struct {
+    char* info;  // Block data
+} BLOQUE;
+```
+
+## FAT (File Allocation Table) Implementation
+
+### FAT Structure
+
+The FAT is an array where each entry corresponds to a block:
+- **Index**: Block number
+- **Value**: Next block in chain, or `__UINT32_MAX__` for end-of-file
+- **0**: Free block (not allocated)
+
+### FAT Initialization
+
+```c:filesystem/src/main.c
+bool iniciar_fat(int tamano_fat, char* path_fat) {
+    FAT entrada;
+    FILE* f = fopen(path_fat, "rb+");
+    
+    if (f != NULL) {
+        fclose(f);
+        return true;  // FAT already exists
+    } else {
+        int entradas = tamano_fat / sizeof(FAT);
+        entrada.entrada_FAT = 0;
+        f = fopen(path_fat, "wb");
+        
+        if (f != NULL) {
+            // Initialize all entries to 0 (free)
+            for (int i = 0; i < entradas; i++) {
+                fwrite(&entrada, sizeof(uint32_t), 1, f);
+            }
+            
+            // Mark boot block (block 0) as EOF
+            fseek(f, 0, SEEK_SET);
+            entrada.entrada_FAT = __UINT32_MAX__;
+            fwrite(&entrada, sizeof(uint32_t), 1, f);
+        } else {
+            fclose(f);
+            return false;
+        }
+        fclose(f);
+        return true;
+    }
+}
+```
+
+### FAT Operations
+
+**Find last block in chain:**
+
+```c:filesystem/src/main.c
+uint32_t buscarUltimoBloque(FILE* fat, int inicio) {
+    fseek(fat, sizeof(uint32_t) * inicio, SEEK_SET);
+    uint32_t siguiente;
+    uint32_t bloqueSig;
+    
+    sleep(retardo_acceso_fat / 1000);
+    fread(&siguiente, sizeof(uint32_t), 1, fat);
+    log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", 
+            ((ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t)));
+    
+    bloqueSig = ((ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t));
+    
+    // Traverse chain until EOF marker
+    while (siguiente != __UINT32_MAX__) {
+        bloqueSig = (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t);
+        fseek(fat, siguiente * sizeof(uint32_t), SEEK_SET);
+        sleep(retardo_acceso_fat / 1000);
+        fread(&siguiente, sizeof(uint32_t), 1, fat);
+        bloqueSig = (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t);
+        log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", 
+                (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t));
+    }
+    return bloqueSig;
+}
+```
+
+**Update FAT to link blocks:**
+
+```c:filesystem/src/main.c
+void actualizarFAT(FILE* f, uint32_t ultimoBloque, uint32_t nuevoBloque) {
+    uint32_t direccionNuevo = nuevoBloque * sizeof(uint32_t);
+    
+    // Update last block to point to new block
+    fseek(f, ultimoBloque * sizeof(uint32_t), SEEK_SET);
+    sleep(retardo_acceso_fat / 1000);
+    log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", (ftell(f)) / sizeof(uint32_t));
+    fwrite(&nuevoBloque, sizeof(uint32_t), 1, f);
+    
+    // Mark new block as EOF
+    fseek(f, direccionNuevo, SEEK_SET);
+    uint32_t eof = __UINT32_MAX__;
+    sleep(retardo_acceso_fat / 1000);
+    log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", (ftell(f)) / sizeof(uint32_t));
+    fwrite(&eof, sizeof(uint32_t), 1, f);
+}
+```
+
+**Get all blocks of a file:**
+
+```c:filesystem/src/main.c
+void bloquesArchivo(FILE* fat, int inicio, int tamano, uint32_t* bloques) {
+    if (inicio == -1) {
+        return;
+    }
+    
+    fseek(fat, sizeof(uint32_t) * inicio, SEEK_SET);
+    uint32_t siguiente = 0;
+    int i = 0;
+    
+    while (siguiente != __UINT32_MAX__) {
+        bloques[i] = ftell(fat) / sizeof(uint32_t);
+        usleep(retardo_acceso_fat * 1000);
+        fread(&siguiente, sizeof(uint32_t), 1, fat);
+        log_info(logger_filesystem, "Acceso FAT - Entrada: %ld - Valor:%d", 
+                ((ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t)), siguiente);
+        fseek(fat, siguiente * sizeof(uint32_t), SEEK_SET);
+        i++;
+    }
+}
+```
+
+## Block Management
+
+### Block Allocation Bitmap
+
+```c:filesystem/src/main.c
+bool* bitmapBloques;      // Bitmap for file blocks
+bool* bitmapBloquesSwap;  // Bitmap for swap blocks
+int bloquesLibres;        // Count of free file blocks
+int swapLibres;           // Count of free swap blocks
+```
+
+### Block Initialization
+
+```c:filesystem/src/main.c
+bool iniciar_bloques(int tamano_bloques, bool* bitmapBloques, bool* bitmapSwap) {
+    BLOQUE bloque;
+    bloque.info = calloc(1, tamano_bloques);
+    strcpy(bloque.info, "0");  // Mark as free
+    
+    FILE* f = fopen(path_bloques, "rb+");
+    
+    if (f != NULL) {
+        swapLibres = 0;
+        bloquesLibres = 0;
+        
+        // Read swap blocks
+        for (int i = 0; i < cant_bloques_swap; i++) {
+            fread(bloque.info, 1, tamano_bloques, f);
+            if (strcmp(bloque.info, "0") == 0) {
+                swapLibres++;
+            } else {
+                bitmapSwap[i] = 1;
+            }
+        }
+        
+        // Read file blocks
+        for (int i = 0; i < (cant_bloques_total - cant_bloques_swap); i++) {
+            fread(bloque.info, 1, tamano_bloques, f);
+            if (strcmp(bloque.info, "0") == 0) {
+                bloquesLibres++;
+            } else {
+                bitmapBloques[i] = 1;
+            }
+        }
+        
+        bloquesLibres--;  // Block 0 is reserved for boot
+        free(bloque.info);
+        fclose(f);
+        return true;
+    } else {
+        // Create new blocks file
+        f = fopen(path_bloques, "wb");
+        if (f != NULL) {
+            for (int i = 0; i < cant_bloques_total; i++) {
+                fwrite(bloque.info, tamano_bloques, 1, f);
+            }
+            swapLibres = cant_bloques_swap;
+            bloquesLibres = (cant_bloques_total - cant_bloques_swap - 1);
+            free(bloque.info);
+            fclose(f);
+            return true;
+        } else {
+            free(bloque.info);
+            fclose(f);
+            return false;
+        }
+    }
+}
+```
+
+### Block Allocation
+
+**Find free block:**
+
+```c:filesystem/src/main.c
+uint32_t buscarBloqueLibre(bool* bitmap) {
+    uint32_t i = 1;  // Start at 1 (block 0 is boot block)
+    while (i < (cant_bloques_total - cant_bloques_swap) && bitmap[i] != 0) {
+        i++;
+    }
+    return i;
+}
+```
+
+**Reserve block:**
+
+```c:filesystem/src/main.c
+void reservarBloque(uint32_t bloque, bool* bitmap) {
+    bitmap[bloque] = 1;
+    bloquesLibres--;
+}
+```
+
+**Free block:**
+
+```c:filesystem/src/main.c
+void liberarBloque(FILE* f, uint32_t bloqueLib, bool* bitmap) {
+    bloqueLib = bloqueLib + cant_bloques_swap;
+    fseek(f, bloqueLib * tam_bloque, SEEK_SET);
+    
+    BLOQUE bloque;
+    bloque.info = malloc(tam_bloque);
+    strcpy(bloque.info, "0");
+    
+    log_info(logger_filesystem, "ACCESO A BLOQUE NRO: %ld", 
+            ftell(f) / tam_bloque - cant_bloques_swap);
+    fwrite(bloque.info, tam_bloque, 1, f);
+    
+    bitmap[bloqueLib - cant_bloques_swap] = 0;
+    bloquesLibres++;
+    free(bloque.info);
+}
+```
+
+### Block I/O Operations
+
+**Read block:**
+
+```c:filesystem/src/main.c
+void* leer_bloque(int num_bloque) {
+    FILE* f = fopen(path_bloques, "rb");
+    if (f != NULL) {
+        void* info = malloc(tam_bloque);
+        usleep(retardo_acceso_bloque * 1000);
+        
+        if (num_bloque < cant_bloques_swap) {
+            fseek(f, tam_bloque * num_bloque, SEEK_SET);
+            log_info(logger_filesystem, "Acceso SWAP: %ld", ftell(f) / tam_bloque);
+            fread(info, tam_bloque, 1, f);
+            fclose(f);
+        } else {
+            fseek(f, tam_bloque * num_bloque, SEEK_SET);
+            log_info(logger_filesystem, "ACCESO A BLOQUE NRO: %ld", 
+                    ftell(f) / tam_bloque - cant_bloques_swap);
+            fread(info, tam_bloque, 1, f);
+            fclose(f);
+        }
+        return info;
+    } else {
+        fclose(f);
+        return NULL;
+    }
+}
+```
+
+**Write block:**
+
+```c:filesystem/src/main.c
+void escribir_bloque_void(int num_bloque, void* info) {
+    FILE* f = fopen(path_bloques, "rb+");
+    if (f != NULL) {
+        usleep(retardo_acceso_bloque * 1000);
+        fseek(f, tam_bloque * num_bloque, SEEK_SET);
+        
+        if (num_bloque < cant_bloques_swap) {
+            log_info(logger_filesystem, "Acceso SWAP: %ld", ftell(f) / tam_bloque);
+            fwrite(info, tam_bloque, 1, f);
+        } else {
+            log_info(logger_filesystem, "ACCESO A BLOQUE %ld", 
+                    ftell(f) / tam_bloque - cant_bloques_swap);
+            fwrite(info, tam_bloque, 1, f);
+        }
+        fclose(f);
+    } else {
+        fclose(f);
+    }
+}
+```
+
+## File Control Block (FCB)
+
+### FCB Storage
+
+FCBs are stored as **configuration files** in the FCB directory:
+
+```
+path_fcb/
+  archivo1.fcb
+  archivo2.fcb
+  ...
+```
+
+Each FCB file contains:
+```
+NOMBRE_ARCHIVO=archivo1
+TAMANIO_ARCHIVO=2048
+BLOQUE_INICIAL=5
+```
+
+### FCB Operations
+
+**Create FCB:**
+
+```c:filesystem/src/main.c
+bool crear_archivo(char* nombre) {
+    char nombreArchivo[strlen(nombre) + 1];
+    strcpy(nombreArchivo, nombre);
+    
+    int tam = strlen(path_fcb) + strlen(nombre) + 6;
+    char ruta[tam];
+    strcpy(ruta, path_fcb);
+    strcat(ruta, "/");
+    strcat(ruta, nombre);
+    strcat(ruta, ".fcb");
+    
+    t_config* nuevoFCB = config_create(ruta);
+    
+    if (nuevoFCB != NULL) {
+        return false;  // File already exists
+    } else {
+        nuevoFCB = (t_config*)malloc(sizeof(t_config));
+        nuevoFCB->properties = dictionary_create();
+        nuevoFCB->path = ruta;
+        
+        config_save_in_file(nuevoFCB, ruta);
+        config_set_value(nuevoFCB, "NOMBRE_ARCHIVO", nombre);
+        config_set_value(nuevoFCB, "TAMANIO_ARCHIVO", "0");
+        config_set_value(nuevoFCB, "BLOQUE_INICIAL", " ");
+        config_save(nuevoFCB);
+        
+        dictionary_destroy(nuevoFCB->properties);
+        free(nuevoFCB);
+        return true;
+    }
+}
+```
+
+**Open file (read FCB):**
+
+```c:filesystem/src/main.c
+int abrir_archivo(char* nombre) {
+    int tamRuta = strlen(path_fcb) + strlen(nombre) + 6;
+    char* ruta = (char*)malloc(tamRuta);
+    strcpy(ruta, path_fcb);
+    strcat(ruta, "/");
+    strcat(ruta, nombre);
+    strcat(ruta, ".fcb");
+    
+    t_config* fcb = iniciar_config(ruta);
+    if (fcb != NULL) {
+        int tamano = config_get_int_value(fcb, "TAMANIO_ARCHIVO");
+        config_destroy(fcb);
+        free(ruta);
+        return tamano;
+    }
+    free(ruta);
+    return -1;  // File doesn't exist
+}
+```
+
+**Update FCB:**
+
+```c:filesystem/src/main.c
+void actualizarFcb(char* nombre, int tamano, int bloque) {
+    int tamRuta = strlen(path_fcb) + strlen(nombre) + 6;
+    char* ruta = (char*)malloc(tamRuta);
+    strcpy(ruta, path_fcb);
+    strcat(ruta, "/");
+    strcat(ruta, nombre);
+    strcat(ruta, ".fcb");  
+    
+    char str2[8];
+    snprintf(str2, sizeof(str2), "%d", tamano);
+    char str3[5];
+    snprintf(str3, sizeof(str3), "%d", bloque);
+    
+    t_config* fcb = iniciar_config(ruta);
+    free(ruta);
+    
+    if (fcb != NULL) {
+        config_set_value(fcb, "TAMANIO_ARCHIVO", str2);
+        config_set_value(fcb, "BLOQUE_INICIAL", str3);
+        config_save(fcb);
+        config_destroy(fcb);
+    }
+}
+```
+
+## File Truncate Operations
+
+### Truncate (Expand/Shrink)
+
+```c:filesystem/src/main.c
+bool truncarArchivo(char* nombre, int tamano, bool* bitmap) {
+    int bloqueInicio = obtener_bloqueInicial(nombre);
+    int tamanoActual = abrir_archivo(nombre);
+    
+    if (tamanoActual == 0) {
+        bloqueInicio = asignarBloque(nombre, bitmap);
+    }
+    
+    if (tamanoActual < tamano) {
+        // Expand file
+        ampliarArchivo(bloqueInicio, tamanoActual, tamano, bitmap);
+        actualizarFcb(nombre, tamano, bloqueInicio);
+        return true;
+    } else if (tamanoActual > tamano) {
+        // Shrink file
+        achicarArchivo(bloqueInicio, tamanoActual, tamano, bitmap);
+        actualizarFcb(nombre, tamano, bloqueInicio);
+        return true;
+    }
+    return false;
+}
+```
+
+### Expand File
+
+```c:filesystem/src/main.c
+void ampliarArchivo(int bloqueInicio, int tamanoActual, int tamanoNuevo, bool* bitmap) {
+    int bloquesAmpliar = (tamanoNuevo - tamanoActual) / tam_bloque;
+    
+    if (bloquesAmpliar <= bloquesLibres) {
+        FILE* fat = fopen(path_fat, "rb+");
+        uint32_t ultimo_bloque_de_archivo = buscarUltimoBloque(fat, bloqueInicio);
+        uint32_t bloqueLibre;
+        
+        // Allocate additional blocks
+        for (int i = (tamanoActual / tam_bloque); i < tamanoNuevo / tam_bloque - 1; i++) {
+            bloqueLibre = buscarBloqueLibre(bitmap);
+            actualizarFAT(fat, ultimo_bloque_de_archivo, bloqueLibre);
+            reservarBloque(bloqueLibre, bitmap);
+            ultimo_bloque_de_archivo = buscarUltimoBloque(fat, ultimo_bloque_de_archivo);
+        }
+        fclose(fat);
+    }
+}
+```
+
+### Shrink File
+
+```c:filesystem/src/main.c
+void achicarArchivo(int bloqueInicio, int tamanoActual, int tamanoNuevo, bool* bitmap) {
+    FILE* bloques = fopen(path_bloques, "rb+");
+    FILE* fat = fopen(path_fat, "rb+");
+    
+    int bloquesLiberar = (tamanoActual - tamanoNuevo) / tam_bloque;
+    uint32_t libre = 0;
+    uint32_t eof = __UINT32_MAX__;
+    
+    // Get all blocks of the file
+    uint32_t* bloquesOcupados = (uint32_t*)calloc(tamanoActual / tam_bloque, sizeof(uint32_t));
+    bloquesArchivo(fat, bloqueInicio, tamanoActual / tam_bloque, bloquesOcupados);
+    
+    // Free blocks from the end
+    for (int i = tamanoActual / tam_bloque; i > tamanoNuevo / tam_bloque; i--) {
+        liberarBloque(bloques, bloquesOcupados[i-1], bitmap);
+        
+        // Update FAT entry to free
+        fseek(fat, bloquesOcupados[i-1] * sizeof(uint32_t), SEEK_SET);
+        fwrite(&libre, sizeof(uint32_t), 1, fat);
+        log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", 
+                (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t));
+        
+        // Mark previous block as EOF
+        fseek(fat, bloquesOcupados[i-2] * sizeof(uint32_t), SEEK_SET);
+        fwrite(&eof, sizeof(uint32_t), 1, fat);
+        log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", 
+                (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t));
+    }
+    
+    fclose(fat);
+    fclose(bloques);
+    free(bloquesOcupados);
+}
+```
+
+### Assign Initial Block
+
+```c:filesystem/src/main.c
+int asignarBloque(char* nombre, bool* bitmap) {
+    uint32_t bloque = buscarBloqueLibre(bitmap);
+    reservarBloque(bloque, bitmap);
+    
+    uint32_t eof = __UINT32_MAX__;
+    FILE* fat = fopen(path_fat, "rb+");
+    fseek(fat, (bloque) * sizeof(uint32_t), SEEK_SET);
+    fwrite(&eof, sizeof(uint32_t), 1, fat);
+    log_info(logger_filesystem, "ACCESO A FAT, ENTRADA %ld", 
+            (ftell(fat) - sizeof(uint32_t)) / sizeof(uint32_t));
+    fclose(fat);
+    
+    actualizarFcb(nombre, 1024, bloque);
+    return bloque;
+}
+```
+
+## Swap Space Management
+
+### Swap Block Reservation
+
+```c:filesystem/src/main.c
+bool reservar_bloquesSWAP(int cant_bloques, int bloques_reservados[], bool* bitmap) {
+    if (swapLibres < cant_bloques) {
+        return false;
+    }
+    
+    FILE* f = fopen(path_bloques, "rb+");
+    fseek(f, 0, SEEK_SET);
+    BLOQUE bloque;
+    bloque.info = malloc(tam_bloque);
+    
+    if (f != NULL) {
+        int j = 0;
+        while (j < cant_bloques) {
+            fread(bloque.info, tam_bloque, 1, f);
+            fseek(f, -(tam_bloque), SEEK_CUR);
+            
+            if (strcmp(bloque.info, "0") == 0) {
+                swapLibres--;
+                strcpy(bloque.info, "\0");
+                bloques_reservados[j] = (ftell(f) / tam_bloque);
+                bitmap[ftell(f) / tam_bloque] = 1;
+                log_info(logger_filesystem, "BLOQUES RESERVADOS: %ld", (ftell(f) / tam_bloque));
+                fwrite(bloque.info, tam_bloque, 1, f);
+                j++;
+            } else {
+                fseek(f, tam_bloque, SEEK_CUR);
+            }
+        }
+        fclose(f);
+        free(bloque.info);
+        return true;
+    } else {
+        free(bloque.info);
+        return false;
+    }
+}
+```
+
+### Swap Block Liberation
+
+```c:filesystem/src/main.c
+bool liberar_bloquesSWAP(int bloques[], int cantidad, bool *bitmap) {
+    FILE *f = fopen(path_bloques, "rb+");
+    
+    if (f != NULL) {
+        BLOQUE bloque;
+        bloque.info = malloc(tam_bloque);
+        strcpy(bloque.info, "0");
+        
+        for (int i = 0; i < cantidad; i++) {
+            fseek(f, tam_bloque * bloques[i], SEEK_SET);
+            usleep(retardo_acceso_bloque * 1000);
+            log_info(logger_filesystem, "ACCESO A BLOQUE SWAP NRO: %ld", ftell(f) / tam_bloque);
+            bitmap[bloques[i]] = 0;
+            fwrite(bloque.info, tam_bloque, 1, f);
+            swapLibres++;
+        }
+        
+        fclose(f);
+        free(bloque.info);
+        return true;
+    } else {
+        return false;
+    }
+}
+```
+
+## File System Initialization
+
+```c:filesystem/src/main.c
+int main(int argc, char* argv[]) {
+    levantar_config(argv[1]);
+    
+    int fd_filesystem = iniciar_servidor(logger_filesystem, NULL, puerto_escucha, "FILESYSTEM");
+    int tamano_fat = (cant_bloques_total - cant_bloques_swap) * sizeof(uint32_t);
+    
+    // Initialize bitmaps
+    bool* bitmapBloquesSwap = (bool*)malloc(sizeof(bool) * cant_bloques_swap);
+    bool* bitmapBloques = (bool*)malloc(sizeof(bool) * (cant_bloques_total - cant_bloques_swap));
+    inicializarBitMap(bitmapBloquesSwap, cant_bloques_swap);
+    inicializarBitMap(bitmapBloques, (cant_bloques_total - cant_bloques_swap));
+    
+    // Initialize FAT
+    if (!iniciar_fat(tamano_fat, path_fat)) {
+        log_error(logger_filesystem, "Error al crear el archivo FAT");
+    } else {
+        log_info(logger_filesystem, "FAT iniciada correctamente");
+    }
+    
+    // Initialize blocks
+    if (!iniciar_bloques(tam_bloque, bitmapBloques, bitmapBloquesSwap)) {
+        log_error(logger_filesystem, "Error al iniciar el archivo de bloques");
+    } else {
+        log_info(logger_filesystem, "Archivo de bloques iniciado correctamente: SWAP LIBRE %d, BLOQUES LIBRES %d",
+                swapLibres, bloquesLibres);
+    }
+    
+    // Listen for connections
+    while(server_escuchar_filesystem(logger_filesystem, "FILESYSTEM", fd_filesystem, 
+                                     bitmapBloques, bitmapBloquesSwap));
+    
+    terminar_programa(logger_filesystem, config);
+    liberar_conexion(conexion_filesystem_memoria);
+}
+```

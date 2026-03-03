@@ -1,0 +1,221 @@
+---
+title: 'FAT API'
+description: 'File Allocation Table (FAT) management functions for the MAPPA OS filesystem'
+---
+
+## Overview
+
+The FAT (File Allocation Table) API provides functions for managing the file allocation table in the MAPPA OS filesystem. The FAT is used to track block chains for files, linking blocks together in a linked-list structure.
+
+## Data Structures
+
+### FAT
+
+```c
+typedef struct {
+    uint32_t entrada_FAT;
+} FAT;
+```
+
+Represents a single entry in the File Allocation Table. Each entry contains:
+- `entrada_FAT`: Pointer to the next block in the chain, or `__UINT32_MAX__` for end-of-file
+
+## Functions
+
+### iniciar_fat
+
+```c
+bool iniciar_fat(int tamano_fat, char* path_fat);
+```
+
+Initializes the FAT file or verifies its existence.
+
+**Parameters:**
+- `tamano_fat`: Size of the FAT in bytes (calculated as `(cant_bloques_total - cant_bloques_swap) * sizeof(uint32_t)`)
+- `path_fat`: Path to the FAT file
+
+**Returns:**
+- `true`: FAT initialized successfully or already exists
+- `false`: Error creating FAT file
+
+**Behavior:**
+- If the FAT file exists, it verifies and returns success
+- If the file doesn't exist, creates it and initializes all entries to 0
+- Sets the first entry (block 0, boot block) to `__UINT32_MAX__` to mark it as used
+
+**Location:** `filesystem/src/main.c:531`
+
+---
+
+### buscarUltimoBloque
+
+```c
+uint32_t buscarUltimoBloque(FILE* fat, int inicio);
+```
+
+Traverses the FAT chain to find the last block of a file.
+
+**Parameters:**
+- `fat`: Open FILE pointer to the FAT file (must be opened in `rb+` mode)
+- `inicio`: Initial block number to start the search
+
+**Returns:**
+- Block number of the last block in the chain
+
+**Behavior:**
+- Starts at the `inicio` block
+- Follows the FAT chain by reading each entry
+- Stops when it encounters `__UINT32_MAX__` (EOF marker)
+- Logs each FAT access with the entry number
+- Applies `retardo_acceso_fat` delay for each access
+
+**Location:** `filesystem/src/main.c:401`
+
+---
+
+### actualizarFAT
+
+```c
+void actualizarFAT(FILE* f, uint32_t ultimoBloque, uint32_t nuevoBloque);
+```
+
+Updates the FAT to link a new block to the end of a file's block chain.
+
+**Parameters:**
+- `f`: Open FILE pointer to the FAT file (must be opened in `rb+` mode)
+- `ultimoBloque`: Block number of the current last block
+- `nuevoBloque`: Block number of the new block to append
+
+**Behavior:**
+- Updates the `ultimoBloque` entry to point to `nuevoBloque`
+- Sets the `nuevoBloque` entry to `__UINT32_MAX__` (EOF marker)
+- Logs each FAT access with the entry number
+- Applies `retardo_acceso_fat` delay for each access (simulating disk access time)
+
+**Location:** `filesystem/src/main.c:421`
+
+---
+
+### bloquesArchivo
+
+```c
+void bloquesArchivo(FILE* fat, int inicio, int tamano, uint32_t* bloques);
+```
+
+Retrieves all block numbers used by a file.
+
+**Parameters:**
+- `fat`: Open FILE pointer to the FAT file (must be opened in read mode)
+- `inicio`: Initial block number of the file (-1 if file has no blocks)
+- `tamano`: Number of blocks to retrieve (file size in blocks)
+- `bloques`: Output array to store block numbers (must be pre-allocated)
+
+**Behavior:**
+- If `inicio` is -1, returns immediately (empty file)
+- Traverses the FAT chain starting from `inicio`
+- Stores each block number in the `bloques` array
+- Logs each FAT access with entry number and value
+- Applies `retardo_acceso_fat` delay for each access
+
+**Location:** `filesystem/src/main.c:433`
+
+---
+
+### obtener_bloqueInicial
+
+```c
+int obtener_bloqueInicial(char* nombre);
+```
+
+Retrieves the initial block number of a file from its FCB.
+
+**Parameters:**
+- `nombre`: File name (without .fcb extension)
+
+**Returns:**
+- Block number of the first block (>= 0)
+- `-1`: Error opening FCB or file not found
+
+**Behavior:**
+- Constructs the FCB file path from `path_fcb` and `nombre`
+- Opens and reads the FCB configuration file
+- Retrieves the `BLOQUE_INICIAL` value
+- Automatically closes and frees resources
+
+**Location:** `filesystem/src/main.c:345`
+
+---
+
+### obtener_bloque
+
+```c
+int obtener_bloque(int bloqueInicial, int nroBloque);
+```
+
+Retrieves the Nth block in a file's block chain.
+
+**Parameters:**
+- `bloqueInicial`: Initial block number of the file
+- `nroBloque`: Index of the block to retrieve (0-based)
+
+**Returns:**
+- Block number at position `nroBloque` in the chain
+
+**Behavior:**
+- Opens the FAT file in read mode
+- Starts at `bloqueInicial`
+- Follows the chain `nroBloque` times
+- Logs each block read and FAT entry accessed
+- Applies `retardo_acceso_fat` delay for each access
+- Automatically closes the FAT file
+
+**Example:**
+- `obtener_bloque(5, 0)` returns block 5 (the initial block)
+- `obtener_bloque(5, 2)` returns the third block in the chain starting from block 5
+
+**Location:** `filesystem/src/main.c:376`
+
+---
+
+## Usage Example
+
+```c
+// Initialize FAT
+int tamano_fat = (cant_bloques_total - cant_bloques_swap) * sizeof(uint32_t);
+if (!iniciar_fat(tamano_fat, path_fat)) {
+    log_error(logger, "Error initializing FAT");
+}
+
+// Get initial block of a file
+int bloque_inicial = obtener_bloqueInicial("archivo.txt");
+
+// Get the third block in the file
+int tercer_bloque = obtener_bloque(bloque_inicial, 2);
+
+// Extend file by adding a new block
+FILE* fat = fopen(path_fat, "rb+");
+uint32_t ultimo = buscarUltimoBloque(fat, bloque_inicial);
+uint32_t nuevo = buscarBloqueLibre(bitmap);
+actualizarFAT(fat, ultimo, nuevo);
+fclose(fat);
+
+// Get all blocks used by a file
+uint32_t* bloques = malloc(num_bloques * sizeof(uint32_t));
+FILE* fat2 = fopen(path_fat, "rb");
+bloquesArchivo(fat2, bloque_inicial, num_bloques, bloques);
+fclose(fat2);
+```
+
+## Related APIs
+
+- [Block Management API](/api/filesystem/blocks) - For managing the actual data blocks
+- [Swap Space API](/api/filesystem/swap) - For swap space management
+
+## Configuration
+
+The FAT API uses the following configuration values from `filesystem.config`:
+
+- `PATH_FAT`: Path to the FAT file
+- `CANT_BLOQUES_TOTAL`: Total number of blocks in the filesystem
+- `CANT_BLOQUES_SWAP`: Number of blocks reserved for swap space
+- `RETARDO_ACCESO_FAT`: Delay in milliseconds for each FAT access (simulates disk latency)

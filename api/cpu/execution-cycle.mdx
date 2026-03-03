@@ -1,0 +1,445 @@
+---
+title: 'CPU Execution Cycle'
+description: 'API reference for the CPU fetch-decode-execute cycle and address translation'
+---
+
+# CPU Execution Cycle
+
+The CPU module implements a classic fetch-decode-execute cycle to process instructions. This page documents the core functions that make up the instruction execution pipeline.
+
+## Execution Cycle Overview
+
+The CPU executes instructions in a continuous loop, coordinating with the Memory and Kernel modules:
+
+```
+┌─────────────────────────────────────┐
+│  1. FETCH: Get next instruction    │
+│     from Memory module              │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  2. DECODE: Translate logical       │
+│     addresses to physical           │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  3. EXECUTE: Run instruction and    │
+│     update PCB state                │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  4. INCREMENT PC and repeat         │
+└─────────────────────────────────────┘
+```
+
+---
+
+## Main Execution Loop
+
+### ciclo_instruccion
+
+Executes the fetch-decode-execute cycle for a process.
+
+**Signature:**
+```c
+void ciclo_instruccion(pcb* contexto, int cliente_socket_dispatch, 
+                       int cliente_socket_interrupt, t_log* logger)
+```
+
+**Parameters:**
+- `contexto`: Process Control Block containing execution state
+- `cliente_socket_dispatch`: Socket for dispatch communication with Kernel
+- `cliente_socket_interrupt`: Socket for interrupt handling
+- `logger`: Logger instance for execution logs
+
+**Behavior:**
+
+1. **Loop Conditions:**
+   - Continues while dispatch socket is active
+   - Stops if `recibio_interrupcion` flag is set
+   - Stops if `recibio_interrupcion_finalizar` flag is set
+   - Stops if `flag_ciclo` is false (instruction caused eviction)
+
+2. **Cycle Steps:**
+   - Allocates memory for instruction structure
+   - Calls `fetchInstruccion()` to retrieve next instruction
+   - Calls `decodeInstruccion()` to translate addresses
+   - Increments program counter (`contexto->pc++`)
+   - Calls `executeInstruccion()` to run the instruction
+   - Frees instruction memory
+
+3. **Interrupt Handling:**
+   - If `recibio_interrupcion` is true:
+     - Resets the flag
+     - Sends PCB with "INTERRUPCION" type if not already evicted
+     - Returns to stop execution
+   - If `recibio_interrupcion_finalizar` is true:
+     - Resets the flag
+     - Returns immediately
+
+4. **Page Fault Handling:**
+   - If `direccion.marco == -1`, a page fault occurred
+   - Frees instruction memory and returns
+   - PCB was already sent to Kernel by `traducir()` function
+
+**Source:** `main.c:149-187`
+
+---
+
+## Fetch Phase
+
+### fetchInstruccion
+
+Retrieves the next instruction from the Memory module.
+
+**Signature:**
+```c
+bool fetchInstruccion(int fd, pcb* contexto, Instruccion *instruccion, t_log* logger)
+```
+
+**Parameters:**
+- `fd`: File descriptor for Memory module connection
+- `contexto`: PCB containing the instruction path and program counter
+- `instruccion`: Pointer to instruction structure (output parameter)
+- `logger`: Logger instance
+
+**Returns:**
+- `true` if instruction was successfully fetched
+- `false` if an error occurred
+
+**Behavior:**
+
+1. **Send Fetch Request:**
+   - Calls `send_fetch_instruccion()` with the process path and PC
+   - Sends a packet to Memory requesting the instruction
+
+2. **Receive Response:**
+   - Waits for operation code from Memory module
+   - Verifies operation code is `ENVIO_INSTRUCCION`
+   - If invalid, logs error and returns `false`
+
+3. **Unpack Instruction:**
+   - Receives the instruction via `recv_instruccion()`
+   - Allocates memory for opcode, operando1, and operando2 strings
+   - Copies strings from temporary buffer to instruction structure
+   - Frees temporary buffer
+
+4. **Logging:**
+   - Logs: `"PID: X - FETCH - Program Counter: Y"`
+   - Logs errors if instruction is NULL or operation code is invalid
+
+**Memory Management:**
+- Caller is responsible for freeing the instruction strings
+- The function allocates exact memory needed: `strlen() + 1`
+
+**Source:** `main.c:282-310`
+
+---
+
+## Decode Phase
+
+### decodeInstruccion
+
+Translates logical addresses to physical addresses for memory operations.
+
+**Signature:**
+```c
+DireccionFisica decodeInstruccion(Instruccion *instruccion, pcb* contexto, int fd_dispatch)
+```
+
+**Parameters:**
+- `instruccion`: Pointer to the instruction to decode
+- `contexto`: PCB for address translation context
+- `fd_dispatch`: Socket for communicating page faults to Kernel
+
+**Returns:**
+- `DireccionFisica` structure with:
+  - `marco >= 0`: Valid physical address
+  - `marco == -1`: Page fault occurred
+  - `marco == -2`: No address translation needed
+  - `marco == -3`: Unexpected error
+
+**Behavior:**
+
+1. **Check Instruction Type:**
+   - Memory instructions: `MOV_IN`, `MOV_OUT`, `F_READ`, `F_WRITE`
+   - These require address translation
+
+2. **Extract Logical Address:**
+   - Calls `obtener_direccion_logica()` to get the address from operands
+   - For `MOV_IN`, `F_READ`, `F_WRITE`: uses `operando2`
+   - For `MOV_OUT`: uses `operando1`
+
+3. **Translate Address:**
+   - Calls `traducir()` to convert logical to physical address
+   - Returns the resulting physical address
+
+4. **Non-Memory Instructions:**
+   - Returns frame = -2 (indicates no translation needed)
+
+**Source:** `main.c:248-268`
+
+### obtener_direccion_logica
+
+Extracts the logical address from an instruction's operands.
+
+**Signature:**
+```c
+int obtener_direccion_logica(Instruccion *instruccion)
+```
+
+**Parameters:**
+- `instruccion`: Instruction containing the address operand
+
+**Returns:**
+- Integer logical address value
+
+**Operand Selection:**
+- `MOV_IN`: Uses second operand (`operando2`)
+- `F_READ`: Uses second operand (`operando2`)
+- `F_WRITE`: Uses second operand (`operando2`)
+- `MOV_OUT`: Uses first operand (`operando1`)
+
+**Source:** `main.c:271-280`
+
+---
+
+## Address Translation
+
+### traducir
+
+Translates a logical address to a physical address (frame + offset).
+
+**Signature:**
+```c
+DireccionFisica traducir(int direccion_logica, int fd, int pid, int fd_dispatch)
+```
+
+**Parameters:**
+- `direccion_logica`: Logical address to translate
+- `fd`: File descriptor for Memory module connection
+- `pid`: Process ID for page table lookup
+- `fd_dispatch`: Socket to send page fault notifications
+
+**Returns:**
+- `DireccionFisica` structure with:
+  - `marco`: Frame number (or -1 for page fault, -2 for error)
+  - `desplazamiento`: Offset within the frame
+
+**Algorithm:**
+
+1. **Calculate Page Number:**
+   ```c
+   numeroPagina = floor(direccion_logica / tamPaginaGlobal)
+   ```
+
+2. **Calculate Offset:**
+   ```c
+   desplazamiento = direccion_logica - (numeroPagina * tamPaginaGlobal)
+   ```
+
+3. **Request Frame from Memory:**
+   - Sends `PEDIDO_MARCO` with PID and page number
+   - Waits for response from Memory module
+
+4. **Handle Response:**
+   
+   **Success (`ENVIO_MARCO`):**
+   - Receives frame number
+   - Creates `DireccionFisica` with frame and offset
+   - Logs: `"PID: X - OBTENER MARCO - Página: Y - Marco: Z"`
+   - Returns physical address
+   
+   **Page Fault (`PCB_PAGEFAULT`):**
+   - Logs: `"Page Fault PID: X - Página: Y"`
+   - Sends PCB with page fault info to Kernel via dispatch
+   - Returns `marco = -1` to signal page fault
+   - CPU yields control back to Kernel
+   
+   **Error:**
+   - Returns `marco = -2`
+
+**Global Variable:**
+- `tamPaginaGlobal`: Page size (retrieved from Memory at startup)
+
+**Source:** `instrucciones.c:4-31`
+
+---
+
+## Execute Phase
+
+### executeInstruccion
+
+Executes a decoded instruction.
+
+**Signature:**
+```c
+void executeInstruccion(pcb* contexto_ejecucion, Instruccion instruccion, 
+                        DireccionFisica direccion, int fd_dispatch, int fd_memoria)
+```
+
+**Parameters:**
+- `contexto_ejecucion`: PCB containing process state
+- `instruccion`: Decoded instruction to execute
+- `direccion`: Physical address (if applicable)
+- `fd_dispatch`: Socket for Kernel communication
+- `fd_memoria`: Socket for Memory communication
+
+**Behavior:**
+
+1. **Execution Logging:**
+   - Logs: `"PID: X - Ejecutando: opcode - operando1 operando2"`
+
+2. **Instruction Dispatch:**
+   - Uses string comparison to identify instruction type
+   - Calls the appropriate instruction handler function
+   - Passes necessary parameters (context, sockets, addresses)
+
+3. **Eviction Flags:**
+   - Blocking instructions set `ya_desalojo = true`
+   - Blocking instructions set `flag_ciclo = false`
+   - This stops the execution cycle after instruction completes
+
+**Instruction Routing:**
+
+| Opcode | Function | Evicts CPU |
+|--------|----------|------------|
+| `SET` | `setInstruccion()` | No |
+| `SUM` | `sumInstruccion()` | No |
+| `SUB` | `subInstruccion()` | No |
+| `JNZ` | `jnzInstruccion()` | No |
+| `MOV_IN` | `movInInstruccion()` | No |
+| `MOV_OUT` | `movOutInstruccion()` | No |
+| `SLEEP` | `sleepInstruccion()` | Yes |
+| `WAIT` | `waitInstruccion()` | Yes |
+| `SIGNAL` | `signalInstruccion()` | Yes |
+| `EXIT` | `exitInstruccion()` | Yes |
+| `F_OPEN` | `fOpenInstruccion()` | Yes* |
+| `F_CLOSE` | `fCloseInstruccion()` | Yes |
+| `F_SEEK` | `fSeekInstruccion()` | Yes |
+| `F_READ` | `fReadInstruccion()` | Yes |
+| `F_WRITE` | `fWriteInstruccion()` | Yes |
+| `F_TRUNCATE` | `fTruncateInstruccion()` | Yes |
+
+*Note: `F_OPEN` sets `flag_ciclo = false` but not `ya_desalojo`
+
+**Source:** `main.c:189-246`
+
+---
+
+## PCB Management
+
+### Process Control Block Structure
+
+The PCB maintains process execution state:
+
+```c
+typedef struct {
+    int pid;                    // Process ID
+    int pc;                     // Program Counter
+    int size;                   // Process size
+    int prioridad;              // Priority
+    int tiempo_ejecucion;       // Execution time
+    char *path;                 // Path to instruction file
+    estado_proceso estado;      // Process state (NEW, READY, EXEC, BLOCK, EXIT)
+    t_registros *registros;     // CPU registers
+    t_list *archivos;           // Open files list
+} pcb;
+```
+
+### CPU Registers Structure
+
+```c
+typedef struct {
+    uint32_t* ax;  // General purpose register A
+    uint32_t* bx;  // General purpose register B
+    uint32_t* cx;  // General purpose register C
+    uint32_t* dx;  // General purpose register D
+} t_registros;
+```
+
+### PCB State Updates
+
+The CPU updates the PCB during execution:
+
+- **Program Counter:** Incremented after each instruction decode
+- **Registers:** Modified by arithmetic and memory instructions
+- **Files:** Updated by file system instructions (managed by Kernel)
+- **State:** Sent back to Kernel when CPU yields or process blocks
+
+---
+
+## Interrupt Handling
+
+The CPU handles two types of interrupts via the interrupt port:
+
+### Standard Interrupt (`INTERRUPCION`)
+
+**Behavior:**
+1. Interrupt thread receives PID from Kernel
+2. Compares with currently executing process PID
+3. If match, sets `recibio_interrupcion = true`
+4. Execution cycle checks flag and yields CPU
+5. PCB sent back to Kernel with "INTERRUPCION" type
+
+**Source:** `main.c:58-64`
+
+### Finalization Interrupt (`INTERRUPCION_FINALIZAR`)
+
+**Behavior:**
+1. Interrupt thread receives PID from Kernel
+2. Compares with currently executing process PID
+3. If match, sets `recibio_interrupcion_finalizar = true`
+4. Execution cycle stops immediately
+5. Process is terminated without sending PCB back
+
+**Source:** `main.c:65-71`
+
+---
+
+## Error Handling
+
+### Page Fault
+
+- **Detection:** `traducir()` receives `PCB_PAGEFAULT` from Memory
+- **Action:** Sends PCB to Kernel with page number
+- **Result:** Process blocks until page is loaded
+
+### Invalid Register
+
+- **Detection:** `obtener_registro()` returns `NULL`
+- **Action:** Logs error message
+- **Result:** Instruction may fail or use undefined behavior
+
+### Invalid Operation Code
+
+- **Detection:** No matching opcode in `executeInstruccion()`
+- **Action:** No error logged (silently ignored)
+- **Result:** No operation performed, PC increments
+
+---
+
+## Communication Protocol
+
+The CPU communicates with other modules:
+
+### Memory Module
+
+- **Fetch Instructions:** `send_fetch_instruccion()` / `recv_instruccion()`
+- **Request Frame:** `send_pedido_marco()` / `recv_marco()`
+- **Read Memory:** `MOV_IN` packet / receive value
+- **Write Memory:** `MOV_OUT` packet
+
+### Kernel Module (Dispatch)
+
+- **Receive PCB:** `recv_pcb()` to start execution
+- **Send PCB:** `send_pcbDesalojado()` when yielding/blocking
+- **Page Fault:** `send_pcb_page_fault()` with page number
+- **File Operations:** Various file instruction packets
+
+### Kernel Module (Interrupt)
+
+- **Receive Interrupts:** `recv_interrupcion()` for quantum/finalization

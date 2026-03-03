@@ -1,0 +1,434 @@
+---
+title: Resource Management API
+description: Resource allocation, synchronization, and deadlock detection for MAPPA OS Kernel
+---
+
+The Resource Management API provides functions for handling resource allocation, WAIT/SIGNAL operations, and deadlock detection.
+
+## Resource Structure
+
+### t_recurso
+
+```c
+typedef struct {
+    char* recurso;              // Resource name
+    int instancias;             // Available instances
+    int encontrado;             // Search result flag (0=found, -1=not found)
+    t_queue* procesos;          // Processes holding the resource
+    t_queue* bloqueados;        // Processes blocked waiting for resource
+    pthread_mutex_t mutex;      // Resource mutex
+} t_recurso;
+```
+
+Resource control structure for tracking allocation and blocking.
+
+**Fields**:
+- `recurso` - Resource identifier string
+- `instancias` - Number of available instances (can be negative when oversubscribed)
+- `encontrado` - Flag set by `buscar_recurso` (0 = found, -1 = not found)
+- `procesos` - Queue of PCBs that have acquired the resource
+- `bloqueados` - Queue of PCBs waiting for the resource
+- `mutex` - Protects concurrent access to resource fields
+
+**Initialization**: See `inicializar_recursos()` in kernel/src/main.c:1341
+
+---
+
+## Resource Operations
+
+### manejar_wait
+
+```c
+void manejar_wait(pcb* proceso, char* recurso)
+```
+
+Handles WAIT operation on a resource (P operation on semaphore).
+
+**Parameters**:
+- `proceso` - Process requesting the resource
+- `recurso` - Resource name
+
+**Behavior**:
+1. Searches for the resource
+2. Removes process from EXEC queue
+3. **If resource not found**:
+   - Logs: "Finaliza el proceso: PID - Motivo: INVALID_RESOURCE"
+   - Moves process to EXIT
+   - Sends termination to memory module
+4. **If resource found**:
+   - Decrements `instancias`
+   - Logs: "PID: X - Wait: RESOURCE - Instancias: N"
+   - **If instances < 0** (no available instances):
+     - Adds process to resource's `bloqueados` queue
+     - Moves process to BLOCK queue
+     - Logs: "PID: X - Bloqueado por: RESOURCE"
+     - Calls `detectar_deadlock_recurso()`
+     - Frees execution slot
+   - **If instances >= 0** (resource available):
+     - Adds process to resource's `procesos` queue
+     - Returns process to EXEC
+     - Sends PCB to CPU
+
+**Source**: kernel/src/main.c:540
+
+---
+
+### manejar_signal
+
+```c
+void manejar_signal(pcb* proceso, char* recurso)
+```
+
+Handles SIGNAL operation on a resource (V operation on semaphore).
+
+**Parameters**:
+- `proceso` - Process releasing the resource
+- `recurso` - Resource name
+
+**Behavior**:
+1. Searches for the resource
+2. Removes process from EXEC queue
+3. **If resource not found**:
+   - Logs: "Finaliza el proceso: PID - Motivo: INVALID_RESOURCE"
+   - Moves process to EXIT
+   - Sends termination to memory module
+4. **If process doesn't hold the resource**:
+   - Logs: "No hay instancias del recurso: X asignadas al proceso"
+   - Moves process to EXIT
+   - Sends termination to memory module
+5. **If valid release**:
+   - Increments `instancias`
+   - Removes process from resource's `procesos` queue
+   - Logs: "PID: X - Signal: RESOURCE - Instancias: N"
+   - **If instances are less than or equal to 0** (blocked processes waiting):
+     - Removes first process from resource's `bloqueados` queue
+     - Adds unblocked process to resource's `procesos` queue
+     - Removes from BLOCK queue
+     - Moves to READY queue
+   - Returns signaling process to EXEC
+   - Sends PCB to CPU
+
+**Source**: kernel/src/main.c:584
+
+---
+
+### buscar_recurso
+
+```c
+t_recurso* buscar_recurso(char* recurso)
+```
+
+Searches for a resource by name in the global resource list.
+
+**Parameters**:
+- `recurso` - Resource name to search
+
+**Returns**: Pointer to `t_recurso` structure.
+
+**Return Value Fields**:
+- `encontrado = 0` - Resource found
+- `encontrado = -1` - Resource not found
+
+**Behavior**:
+- Iterates through `lista_recursos`
+- Compares resource names with `strcmp`
+- Sets `encontrado` flag before returning
+
+**Source**: kernel/src/main.c:633
+
+---
+
+### inicializar_recursos
+
+```c
+t_list* inicializar_recursos()
+```
+
+Initializes the global resource list from configuration.
+
+**Returns**: List of `t_recurso` structures.
+
+**Configuration**:
+- `RECURSOS` - Array of resource names
+- `INSTANCIAS_RECURSOS` - Array of instance counts
+
+**Behavior**:
+1. Creates empty list
+2. For each resource in config:
+   - Allocates `t_recurso` structure
+   - Copies resource name
+   - Sets instance count
+   - Creates empty `procesos` queue
+   - Creates empty `bloqueados` queue
+   - Initializes mutex
+   - Adds to list
+
+**Example Configuration**:
+```
+RECURSOS=["DISCO", "IMPRESORA", "SCANNER"]
+INSTANCIAS_RECURSOS=[2, 1, 3]
+```
+
+**Source**: kernel/src/main.c:1341
+
+---
+
+### liberar_recursos_proceso
+
+```c
+void liberar_recursos_proceso(pcb* proceso)
+```
+
+Releases all resources held by a process (called on process termination).
+
+**Parameters**:
+- `proceso` - Process whose resources should be released
+
+**Behavior**:
+- Iterates through all resources in `lista_recursos`
+- For each resource, calls `buscar_proceso_asignado_recurso_y_eliminar`
+- Removes process from both `procesos` and `bloqueados` queues
+- Increments instance counts
+- Unblocks waiting processes if applicable
+
+**Called By**:
+- `finalizar_proceso` command handler
+- PCB_EXIT handler in `manejar_recibir_cpu`
+
+**Source**: kernel/src/main.c:1397
+
+---
+
+## Deadlock Detection
+
+### detectar_deadlock_recurso
+
+```c
+void detectar_deadlock_recurso()
+```
+
+Detects resource-based deadlocks using wait-for graph analysis.
+
+**Behavior**:
+1. Logs: "ANÁLISIS DE DETECCIÓN DE DEADLOCK"
+2. For each process in BLOCK queue:
+   - Collects resources in possession: `recursos_que_tiene()`
+   - Collects resources being waited for: `recursos_que_espera()`
+   - Checks for hold-and-wait condition: `tiene_retencion_y_espera()`
+   - Builds retention chain
+3. Checks for circular wait: `verificar_espera_circular()`
+4. If deadlock detected:
+   - Logs detailed deadlock information via `loguear_deadlock()`
+
+**Algorithm**: Wait-for graph cycle detection
+
+**Called By**: `manejar_wait` after blocking a process
+
+**Source**: kernel/src/main.c:1566
+
+---
+
+### recursos_que_tiene
+
+```c
+t_list* recursos_que_tiene(pcb* proceso)
+```
+
+Returns list of resources held by a process.
+
+**Parameters**:
+- `proceso` - Process to query
+
+**Returns**: List of resource name strings.
+
+**Behavior**:
+- Iterates through `lista_recursos`
+- Checks if process is in resource's `procesos` queue
+- Adds resource name to result list
+
+**Source**: kernel/src/main.c:1606
+
+---
+
+### recursos_que_espera
+
+```c
+t_list* recursos_que_espera(pcb* proceso)
+```
+
+Returns list of resources being waited for by a process.
+
+**Parameters**:
+- `proceso` - Process to query
+
+**Returns**: List of resource name strings.
+
+**Behavior**:
+- Iterates through `lista_recursos`
+- Checks if process is in resource's `bloqueados` queue
+- Adds resource name to result list
+
+**Source**: kernel/src/main.c:1617
+
+---
+
+### tiene_retencion_y_espera
+
+```c
+t_list* tiene_retencion_y_espera(pcb* proceso)
+```
+
+Checks if a process has hold-and-wait condition (necessary for deadlock).
+
+**Parameters**:
+- `proceso` - Process to check
+
+**Returns**: List with retention chain [HELD_RESOURCE, WAITING_RESOURCE], or empty list.
+
+**Behavior**:
+- Looks for resources held by process
+- Checks if process is also waiting for another resource
+- Returns pair: [resource held, resource waiting]
+
+**Deadlock Condition**: Process holds resource A and waits for resource B
+
+**Source**: kernel/src/main.c:1639
+
+---
+
+### verificar_espera_circular
+
+```c
+bool verificar_espera_circular(t_list* lista_retencion)
+```
+
+Checks for circular wait condition in retention chain.
+
+**Parameters**:
+- `lista_retencion` - Chain of hold-wait pairs
+
+**Returns**: `true` if circular wait detected, `false` otherwise.
+
+**Algorithm**:
+- Compares first element with last element
+- If equal, a cycle exists: [R1, R2, R2, R3, R3, R1]
+
+**Example Cycle**:
+```
+P1 holds R1, waits for R2
+P2 holds R2, waits for R3
+P3 holds R3, waits for R1
+Chain: [R1, R2, R2, R3, R3, R1]
+```
+
+**Source**: kernel/src/main.c:1628
+
+---
+
+### loguear_deadlock
+
+```c
+void loguear_deadlock(t_list* lista_posible_deadlock)
+```
+
+Logs detailed deadlock information for all involved processes.
+
+**Parameters**:
+- `lista_posible_deadlock` - List of `estructura_deadlock` structures
+
+**Log Format**:
+```
+Deadlock detectado: PID - Recursos en posesión [R1, R2] - Recurso requerido: [R3]
+```
+
+**Behavior**:
+- Iterates through all processes in deadlock
+- Converts resource lists to strings
+- Logs PID, held resources, and required resources
+
+**Source**: kernel/src/main.c:1595
+
+---
+
+## Helper Structures
+
+### estructura_deadlock
+
+```c
+typedef struct {
+    t_list* recursos_en_posecion;  // Resources held
+    t_list* recursos_en_espera;    // Resources waiting for
+    int pid;                       // Process ID
+} estructura_deadlock;
+```
+
+Structure for deadlock analysis and logging.
+
+**Functions**:
+- `armar_estructura_deadlock()` - Constructor
+- `estructura_deadlock_destroyer()` - Destructor
+
+**Source**: kernel/src/main.h:78
+
+---
+
+## Configuration
+
+Resources are configured in the kernel configuration file:
+
+```conf
+RECURSOS=["DISCO", "IMPRESORA", "SCANNER"]
+INSTANCIAS_RECURSOS=[2, 1, 3]
+```
+
+**Array Correspondence**:
+- Index 0: DISCO has 2 instances
+- Index 1: IMPRESORA has 1 instance
+- Index 2: SCANNER has 3 instances
+
+**Loading**: See `levantar_config()` in kernel/src/main.c:55
+
+---
+
+## Error Handling
+
+### Invalid Resource
+
+When a process attempts WAIT or SIGNAL on non-existent resource:
+1. Process moved to EXIT
+2. Log: "Finaliza el proceso: PID - Motivo: INVALID_RESOURCE"
+3. Memory notified to free process space
+
+### Invalid Signal
+
+When a process signals a resource it doesn't hold:
+1. Process moved to EXIT
+2. Log: "No hay instancias del recurso: X asignadas al proceso"
+3. Memory notified to free process space
+
+---
+
+## Synchronization
+
+### Resource Mutex
+
+Each resource has its own mutex protecting:
+- `instancias` counter
+- `procesos` queue modifications
+- `bloqueados` queue modifications
+
+### Global Variables
+
+```c
+t_list* lista_recursos;  // Global resource list
+```
+
+**Initialization**: Called in `iniciar_listas()` during kernel startup
+
+---
+
+## See Also
+
+- [Scheduler API](/api/kernel/scheduler) - Process scheduling and queue management
+- [Console Commands](/api/kernel/console-commands) - User commands including FINALIZAR_PROCESO
+- [PCB Structure](/api/common/pcb) - Process Control Block definition

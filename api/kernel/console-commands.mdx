@@ -1,0 +1,449 @@
+---
+title: Console Commands
+description: Interactive console commands for process and system management in MAPPA OS Kernel
+---
+
+The Kernel console provides interactive commands for process lifecycle management, scheduling control, and system monitoring.
+
+## Console Thread
+
+The console runs in a dedicated thread created at kernel startup:
+
+```c
+void* leer_consola(void* arg)
+```
+
+**Behavior**:
+- Prompts: "Ingrese un comando: "
+- Reads command using readline (supports history)
+- Parses command and arguments with `strtok`
+- Executes corresponding handler function
+- Displays errors for invalid parameters or unknown commands
+
+**Thread**: Created in `iniciar_hilos()` as `hilo_consola`
+
+**Source**: kernel/src/main.c:76
+
+---
+
+## Commands
+
+### INICIAR_PROCESO
+
+```bash
+INICIAR_PROCESO <path> <size> <prioridad>
+```
+
+Creates a new process from a pseudocode file in the filesystem.
+
+**Parameters**:
+- `path` - Path to pseudocode file in filesystem
+- `size` - Memory size required (in bytes)
+- `prioridad` - Process priority (lower value = higher priority)
+
+**Behavior**:
+1. Creates PCB with unique PID
+2. Sets size, priority, and initial state (NEW)
+3. Initializes registers to 0 (AX, BX, CX, DX)
+4. Initializes PC to 0
+5. Adds process to NEW queue
+6. Sends initialization request to Memory module
+7. Waits for Memory confirmation
+8. Logs: "Se crea el proceso PID en NEW"
+
+**Example**:
+```bash
+INICIAR_PROCESO /home/utnso/scripts/PLANI /home/utnso/scripts/MEMORIA 0
+```
+
+**Handler**: `iniciar_proceso(char* path, char* size, char* prioridad)`
+
+**Error Handling**:
+- If any parameter is NULL: "Error en algun parametro"
+
+**Source**: kernel/src/main.c:94, 163
+
+---
+
+### FINALIZAR_PROCESO
+
+```bash
+FINALIZAR_PROCESO <pid>
+```
+
+Terminates a process and releases all its resources.
+
+**Parameters**:
+- `pid` - Process ID to terminate
+
+**Behavior**:
+1. Searches for process in all queues (NEW → READY → EXEC → BLOCK)
+2. **If in EXEC**:
+   - Sends INTERRUPCION_FINALIZAR to CPU
+   - Removes from EXEC queue
+3. **If found in any queue**:
+   - Logs: "Finaliza el proceso PID - Motivo: SUCCESS"
+   - If not in NEW: frees multiprogramming slot (`sem_post(&cantidad_multiprogramacion)`)
+   - If in EXEC: frees execution slot (`sem_post(&puedo_ejecutar_proceso)`)
+   - Moves to EXIT queue
+   - Releases all held resources (`liberar_recursos_proceso`)
+   - Sends termination message to Memory (`send_terminar_proceso`)
+4. **If not found**:
+   - Prints: "No se encontró el proceso con PID X"
+
+**Example**:
+```bash
+FINALIZAR_PROCESO 5
+```
+
+**Handler**: `finalizar_proceso(char* pid)`
+
+**Error Handling**:
+- If PID is NULL: "Error en algun parametro"
+
+**Source**: kernel/src/main.c:100, 172
+
+---
+
+### DETENER_PLANIFICACION
+
+```bash
+DETENER_PLANIFICACION
+```
+
+Pauses both long-term and short-term schedulers.
+
+**Parameters**: None
+
+**Behavior**:
+1. Sets `planificacion_activa = false`
+2. Acquires long-term planning mutex
+3. Decrements `sem_plan_largo` (blocks scheduler)
+4. Releases long-term planning mutex
+5. Acquires short-term planning mutex
+6. Decrements `sem_plan_corto` (blocks scheduler)
+7. Releases short-term planning mutex
+8. Logs: "PAUSA DE PLANIFICACIÓN"
+
+**Effect**:
+- NEW → READY transitions stop
+- READY → EXEC transitions stop
+- Current EXEC process continues until completion/blocking
+- Resume with `INICIAR_PLANIFICACION`
+
+**Example**:
+```bash
+DETENER_PLANIFICACION
+```
+
+**Handler**: `detener_planificacion(void)`
+
+**Source**: kernel/src/main.c:106, 218
+
+---
+
+### INICIAR_PLANIFICACION
+
+```bash
+INICIAR_PLANIFICACION
+```
+
+Resumes paused schedulers.
+
+**Parameters**: None
+
+**Behavior**:
+1. Checks if `planificacion_activa == false`
+2. If paused:
+   - Increments `sem_plan_largo` (unblocks long-term scheduler)
+   - Increments `sem_plan_corto` (unblocks short-term scheduler)
+   - Logs: "INICIO DE PLANIFICACIÓN"
+3. Sets `planificacion_activa = true`
+
+**Effect**:
+- Resumes NEW → READY transitions
+- Resumes READY → EXEC transitions
+- Schedulers continue normal operation
+
+**Example**:
+```bash
+INICIAR_PLANIFICACION
+```
+
+**Handler**: `iniciar_planificacion(void)`
+
+**Notes**:
+- Safe to call even if already running (no-op)
+- Must be called after `DETENER_PLANIFICACION`
+
+**Source**: kernel/src/main.c:108, 230
+
+---
+
+### MULTIPROGRAMACION
+
+```bash
+MULTIPROGRAMACION <nuevo_grado>
+```
+
+Changes the multiprogramming degree (number of processes in memory).
+
+**Parameters**:
+- `nuevo_grado` - New multiprogramming degree (positive integer)
+
+**Behavior**:
+1. Logs current and new multiprogramming degree
+2. **If reducing degree** (new < current):
+   - For each reduction:
+     - Waits on `cantidad_multiprogramacion` semaphore
+     - Decrements `grado_multiprogramacion` counter
+   - Effect: Blocks admission of new processes until degree is met
+3. **If increasing degree** (new > current):
+   - Global variable updated
+   - No semaphore operations needed
+   - New processes can immediately enter
+
+**Example**:
+```bash
+MULTIPROGRAMACION 5
+```
+
+**Log Format**:
+```
+Grado Anterior: 3 - Grado Actual: 5
+```
+
+**Handler**: `cambiar_multiprogramacion(char* nuevo_grado_multiprogramacion)`
+
+**Error Handling**:
+- If nuevo_grado is NULL: "Error en algun parametro"
+
+**Notes**:
+- Initial value from config: `GRADO_MULTIPROGRAMACION_INI`
+- Reducing degree does not evict running processes
+- Only prevents new admissions until degree is satisfied
+
+**Source**: kernel/src/main.c:110, 239
+
+---
+
+### PROCESO_ESTADO
+
+```bash
+PROCESO_ESTADO
+```
+
+Displays all processes organized by their current state.
+
+**Parameters**: None
+
+**Behavior**:
+1. Prints header: "Procesos por estado:"
+2. For each state queue (NEW, READY, EXEC, BLOCKED, EXIT):
+   - Extracts PIDs from queue elements
+   - Converts PID list to string format
+   - Logs: "Estado STATE - PROCESOS: [PID1, PID2, ...]"
+
+**Output Format**:
+```
+Estado NEW - PROCESOS: [1, 2]
+Estado READY - PROCESOS: [3, 4, 5]
+Estado EXEC - PROCESOS: [6]
+Estado BLOCKED - PROCESOS: [7]
+Estado EXIT - PROCESOS: [8, 9]
+```
+
+**Example**:
+```bash
+PROCESO_ESTADO
+```
+
+**Handler**: `proceso_estado(void)`
+
+**Color Coding**: Uses ANSI_COLOR_PINK for log output
+
+**Thread-Safety**:
+- Reads queues without locking (snapshot may be inconsistent)
+- Safe for monitoring, not for critical operations
+
+**Source**: kernel/src/main.c:116, 249
+
+---
+
+## Command Parsing
+
+Commands are parsed using space delimiters:
+
+```c
+char* token = strtok(comando, " ");  // Command name
+char* arg1 = strtok(NULL, " ");      // First argument
+char* arg2 = strtok(NULL, " ");      // Second argument
+char* arg3 = strtok(NULL, " ");      // Third argument
+```
+
+**Command Matching**: Uses `strcmp` for exact string matching
+
+**Unknown Commands**: Displays "Comando no reconocido"
+
+---
+
+## Error Messages
+
+### Invalid Parameters
+
+```
+Error en algun parametro
+```
+
+Displayed when:
+- Required arguments are NULL
+- Insufficient arguments provided
+
+### Unknown Command
+
+```
+Comando no reconocido
+```
+
+Displayed when:
+- Command name doesn't match any known command
+- Typos or incorrect spelling
+
+### Process Not Found
+
+```
+No se encontró el proceso con PID X
+```
+
+Displayed when:
+- `FINALIZAR_PROCESO` receives invalid PID
+- Process already terminated
+
+---
+
+## Process Termination Reasons
+
+The kernel logs different termination reasons:
+
+### SUCCESS
+
+```
+Finaliza el proceso PID - Motivo: SUCCESS
+```
+
+User-initiated termination via `FINALIZAR_PROCESO`
+
+### INVALID_RESOURCE
+
+```
+Finaliza el proceso PID - Motivo: INVALID_RESOURCE
+```
+
+Process attempted WAIT or SIGNAL on non-existent resource
+
+### INVALID_WRITE
+
+```
+Finaliza el proceso PID - Motivo: INVALID_WRITE
+```
+
+Process attempted F_WRITE on file opened in read-only mode
+
+### Normal Exit
+
+When process executes EXIT instruction, termination is handled by CPU dispatch handler without explicit reason logging.
+
+---
+
+## Scheduling Control States
+
+### planificacion_activa
+
+```c
+bool planificacion_activa = true;
+```
+
+**States**:
+- `true` - Schedulers running normally
+- `false` - Schedulers paused
+
+**Controlled By**:
+- `DETENER_PLANIFICACION` → sets to `false`
+- `INICIAR_PLANIFICACION` → sets to `true`
+
+**Effect**:
+- Long-term scheduler checks this before moving NEW → READY
+- Short-term scheduler checks this before moving READY → EXEC
+
+---
+
+## Global Variables
+
+### Multiprogramming
+
+```c
+int grado_multiprogramacion;           // Current degree
+sem_t cantidad_multiprogramacion;      // Available slots
+```
+
+**Initial Value**: From config `GRADO_MULTIPROGRAMACION_INI`
+
+**Semaphore Behavior**:
+- `sem_wait` - Acquire multiprogramming slot (NEW → READY)
+- `sem_post` - Release multiprogramming slot (process exit)
+
+### Process Counter
+
+```c
+int contador_pid = 0;  // Unique PID generator
+```
+
+**Behavior**:
+- Incremented for each `INICIAR_PROCESO`
+- Ensures unique PIDs across system lifetime
+- Never reset (no PID reuse)
+
+---
+
+## Thread Safety
+
+Console commands that modify queues use appropriate mutexes:
+
+- `INICIAR_PROCESO` - Uses `mutex_new`
+- `FINALIZAR_PROCESO` - Uses queue-specific mutexes
+- `PROCESO_ESTADO` - Read-only, no locking
+
+Scheduling control commands use planning mutexes:
+
+- `DETENER_PLANIFICACION` - Uses `mutex_plani_larga`, `mutex_plani_corta`
+- `INICIAR_PLANIFICACION` - Semaphore operations only
+
+---
+
+## Integration with Modules
+
+### Memory Module
+
+**INICIAR_PROCESO**:
+- Sends: `send_inicializar_proceso(proceso, fd_memoria)`
+- Receives: Confirmation message
+
+**FINALIZAR_PROCESO**:
+- Sends: `send_terminar_proceso(pid, fd_memoria)`
+- No response expected
+
+### CPU Module
+
+**FINALIZAR_PROCESO** (if in EXEC):
+- Sends: Interrupt packet with `INTERRUPCION_FINALIZAR` opcode
+- Includes: PID to terminate
+- Target: `fd_cpu_interrupt` socket
+
+---
+
+## See Also
+
+- [Scheduler API](/api/kernel/scheduler) - Scheduling algorithms and queue operations
+- [Resource Management](/api/kernel/resources) - Resource allocation and deadlock detection
+- [PCB Structure](/api/common/pcb) - Process Control Block definition
+- [Communication Protocol](/api/common/communication) - Inter-module messaging

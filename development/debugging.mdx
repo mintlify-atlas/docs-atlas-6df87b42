@@ -1,0 +1,537 @@
+---
+title: Debugging Guide
+description: Tools and techniques for debugging MAPPA OS Simulator
+---
+
+## Debugging with Valgrind
+
+The makefile provides integrated valgrind support for debugging:
+
+### Running with Valgrind
+
+<CodeGroup>
+```bash Start Module (No Analysis)
+make start
+# Equivalent to: valgrind --tool=none ./bin/<module>.out
+```
+
+```bash Memory Debugging
+make memcheck
+# Equivalent to: valgrind --leak-check=full --track-origins=yes ./bin/<module>.out
+```
+
+```bash Thread Debugging
+make helgrind
+# Equivalent to: valgrind --tool=helgrind ./bin/<module>.out
+```
+</CodeGroup>
+
+### Passing Arguments
+
+All valgrind targets support the `ARGS` variable:
+
+```bash
+# Use default config from settings.mk
+make start
+
+# Override with custom arguments
+make start ARGS="./config/custom.config"
+make memcheck ARGS="./config/test.config --verbose"
+```
+
+**Default arguments** are defined in `settings.mk`:
+
+<Tabs>
+  <Tab title="CPU">
+    ```makefile
+    ARGS=./config/integral.config
+    ```
+  </Tab>
+  <Tab title="Memoria">
+    ```makefile
+    ARGS=./config/integral.config
+    ```
+  </Tab>
+  <Tab title="Kernel">
+    ```makefile
+    ARGS=./config/estres.config
+    ```
+  </Tab>
+  <Tab title="Filesystem">
+    ```makefile
+    ARGS=./config/integral.config
+    ```
+  </Tab>
+</Tabs>
+
+## Memory Debugging
+
+### Memory Leak Detection
+
+<CodeGroup>
+```bash Check for Leaks
+make memcheck
+```
+
+```bash With Custom Config
+make memcheck ARGS="./config/custom.config"
+```
+</CodeGroup>
+
+### Memcheck Configuration
+
+Default flags in `settings.mk`:
+
+```makefile
+MEMCHECK_FLAGS=--track-origins=yes
+```
+
+Full command executed:
+```bash
+valgrind --leak-check=full --track-origins=yes ./bin/<module>.out <ARGS>
+```
+
+### Understanding Memcheck Output
+
+<AccordionGroup>
+  <Accordion title="Definitely Lost">
+    Memory that was allocated but never freed and has no pointers to it.
+    
+    ```
+    20 bytes in 1 blocks are definitely lost in loss record 1 of 1
+       at 0x4C2FB0F: malloc (vgpreload_memcheck-amd64-linux.so)
+       by 0x108A2E: create_buffer (memory.c:45)
+       by 0x108B1A: initialize (main.c:23)
+    ```
+    
+    **Action Required:** Add `free()` call for this allocation.
+  </Accordion>
+  
+  <Accordion title="Indirectly Lost">
+    Memory that was lost because it was only reachable through definitely lost blocks.
+    
+    ```
+    40 bytes in 2 blocks are indirectly lost in loss record 2 of 2
+    ```
+    
+    **Action Required:** Fix the "definitely lost" block that pointed to this.
+  </Accordion>
+  
+  <Accordion title="Possibly Lost">
+    Memory that might be reachable through unusual pointer arithmetic.
+    
+    ```
+    80 bytes in 4 blocks are possibly lost in loss record 3 of 3
+    ```
+    
+    **Action Required:** Review pointer usage; may be a false positive.
+  </Accordion>
+  
+  <Accordion title="Still Reachable">
+    Memory that's still pointed to when the program exits (often acceptable).
+    
+    ```
+    72,704 bytes in 1 blocks are still reachable in loss record 4 of 4
+    ```
+    
+    **Action Required:** Often safe to ignore, but consider cleanup.
+  </Accordion>
+  
+  <Accordion title="Invalid Read/Write">
+    Accessing memory outside allocated bounds.
+    
+    ```
+    Invalid write of size 4
+       at 0x108C3D: write_buffer (memory.c:67)
+     Address 0x5204050 is 0 bytes after a block of size 16 alloc'd
+    ```
+    
+    **Action Required:** Fix buffer overflow; check array bounds.
+  </Accordion>
+  
+  <Accordion title="Use of Uninitialized Value">
+    Using variables before they're initialized.
+    
+    ```
+    Conditional jump or move depends on uninitialised value(s)
+       at 0x108D1A: process_data (process.c:89)
+     Uninitialised value was created by a heap allocation
+       at 0x4C2FB0F: malloc (vgpreload_memcheck-amd64-linux.so)
+    ```
+    
+    **Action Required:** Initialize variables; use `calloc()` or `memset()`.
+  </Accordion>
+</AccordionGroup>
+
+### Advanced Memcheck Options
+
+Add custom flags in `settings.mk`:
+
+```makefile
+MEMCHECK_FLAGS=--track-origins=yes --leak-check=full --show-leak-kinds=all \
+               --track-fds=yes --show-reachable=yes
+```
+
+**Useful flags:**
+- `--track-origins=yes` - Track uninitialized value origins
+- `--show-leak-kinds=all` - Show all leak types
+- `--track-fds=yes` - Track file descriptor leaks
+- `--show-reachable=yes` - Show still-reachable blocks
+- `--verbose` - Detailed output
+
+## Thread Safety Debugging
+
+### Using Helgrind
+
+<CodeGroup>
+```bash Check Thread Safety
+make helgrind
+```
+
+```bash With Custom Config
+make helgrind ARGS="./config/multithread.config"
+```
+</CodeGroup>
+
+### Helgrind Configuration
+
+Default flags in `settings.mk`:
+
+```makefile
+HELGRIND_FLAGS=
+```
+
+Add custom flags as needed:
+```makefile
+HELGRIND_FLAGS=--history-level=approx --conflict-cache-size=1000000
+```
+
+### Understanding Helgrind Output
+
+<AccordionGroup>
+  <Accordion title="Data Race">
+    Multiple threads accessing the same memory without proper synchronization.
+    
+    ```
+    Possible data race during write of size 4 at 0x309030 by thread #2
+    Locks held: none
+       at 0x108D5E: increment_counter (thread.c:45)
+    
+    This conflicts with a previous write of size 4 by thread #1
+    Locks held: none
+       at 0x108D5E: increment_counter (thread.c:45)
+    ```
+    
+    **Fix:** Add mutex protection:
+    ```c
+    pthread_mutex_lock(&counter_mutex);
+    counter++;
+    pthread_mutex_unlock(&counter_mutex);
+    ```
+  </Accordion>
+  
+  <Accordion title="Lock Order Violation">
+    Inconsistent lock acquisition order can cause deadlocks.
+    
+    ```
+    Thread #1: lock order "0x309040 before 0x309060" violated
+    ```
+    
+    **Fix:** Always acquire locks in the same order across all threads.
+  </Accordion>
+  
+  <Accordion title="Unlocked Access">
+    Accessing shared data without holding the appropriate lock.
+    
+    ```
+    Possible data race during read of size 8 at 0x5204040
+    Locks held: none
+    ```
+    
+    **Fix:** Ensure all accesses to shared data are protected.
+  </Accordion>
+</AccordionGroup>
+
+## Logging System
+
+The project uses **t_log** from the commons library for structured logging:
+
+### Creating Loggers
+
+```c
+#include <commons/log.h>
+
+t_log* logger = log_create("module.log", "MODULE_NAME", true, LOG_LEVEL_INFO);
+```
+
+**Parameters:**
+- `file` - Log file path (or `NULL` for stdout)
+- `program_name` - Module identifier
+- `is_active_console` - Print to console (`true`/`false`)
+- `log_level` - Minimum log level
+
+### Log Levels
+
+<Tabs>
+  <Tab title="TRACE">
+    ```c
+    log_trace(logger, "Detailed trace information: %d", value);
+    ```
+    Extremely detailed debugging information.
+  </Tab>
+  <Tab title="DEBUG">
+    ```c
+    log_debug(logger, "Debug info: variable=%s", var);
+    ```
+    Detailed debugging information (only in debug builds).
+  </Tab>
+  <Tab title="INFO">
+    ```c
+    log_info(logger, "Module initialized successfully");
+    ```
+    Informational messages about normal operation.
+  </Tab>
+  <Tab title="WARNING">
+    ```c
+    log_warning(logger, "Configuration missing, using defaults");
+    ```
+    Warning messages for potentially problematic situations.
+  </Tab>
+  <Tab title="ERROR">
+    ```c
+    log_error(logger, "Failed to connect to server: %s", error);
+    ```
+    Error messages for failures that don't stop execution.
+  </Tab>
+</Tabs>
+
+### Conditional Logging
+
+Use `DEBUG` macro for debug-only logging:
+
+```c
+#ifdef DEBUG
+    log_debug(logger, "Entering function with param=%d", param);
+#endif
+```
+
+Or use the log level:
+```c
+// Only logs if logger level is DEBUG or TRACE
+log_debug(logger, "Detailed information");
+```
+
+### Logging Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Appropriate Levels" icon="layer-group">
+    `INFO` for normal flow, `DEBUG` for details, `ERROR` for failures.
+  </Card>
+  <Card title="Include Context" icon="message">
+    Log relevant variables, IDs, and state information.
+  </Card>
+  <Card title="Avoid Sensitive Data" icon="shield">
+    Don't log passwords, keys, or personal information.
+  </Card>
+  <Card title="Clean Up Loggers" icon="trash">
+    Call `log_destroy(logger)` before exit.
+  </Card>
+</CardGroup>
+
+### Rotating Logs
+
+Logs can grow large during testing. Rotate or truncate periodically:
+
+```bash
+# Truncate log files
+truncate -s 0 *.log
+
+# Archive old logs
+mv module.log module.log.$(date +%Y%m%d)
+```
+
+## Debug vs Release Builds
+
+### Debug Build (Default)
+
+<CodeGroup>
+```bash Build in Debug Mode
+make debug
+```
+
+```c Debug Flags
+-g -Wall -DDEBUG -fcommon -fdiagnostics-color=always
+```
+</CodeGroup>
+
+**Characteristics:**
+- Debugging symbols included (`-g`)
+- `DEBUG` macro defined
+- No optimizations
+- Slower execution
+- Larger binaries
+
+**When to use:**
+- Development
+- Testing
+- Debugging with gdb or valgrind
+- Memory/thread analysis
+
+### Release Build
+
+<CodeGroup>
+```bash Build in Release Mode
+make release
+```
+
+```c Release Flags
+-O3 -Wall -DNDEBUG -fcommon
+```
+</CodeGroup>
+
+**Characteristics:**
+- No debugging symbols
+- `NDEBUG` macro defined (disables assertions)
+- Full optimizations (`-O3`)
+- Faster execution
+- Smaller binaries
+
+**When to use:**
+- Performance testing
+- Production deployment
+- Benchmarking
+
+### Conditional Compilation
+
+Use macros to enable/disable code based on build type:
+
+```c
+#ifdef DEBUG
+    log_debug(logger, "This only runs in debug builds");
+    assert(pointer != NULL);
+#endif
+
+#ifdef NDEBUG
+    // Release-only code
+#endif
+```
+
+**Assertions** are automatically disabled in release builds:
+```c
+#include <assert.h>
+
+assert(index < array_size); // Only checked in debug builds
+```
+
+## Common Debugging Issues
+
+### Segmentation Faults
+
+**Symptoms:**
+```
+Segmentation fault (core dumped)
+```
+
+**Common causes:**
+1. Null pointer dereference
+2. Array out of bounds
+3. Use after free
+4. Stack overflow
+
+**Debugging approach:**
+```bash
+# Run with memcheck
+make memcheck
+
+# Or use gdb
+gdb ./bin/<module>.out
+(gdb) run ./config/integral.config
+(gdb) backtrace
+```
+
+### Memory Corruption
+
+**Symptoms:**
+- Random crashes
+- Unexpected behavior
+- Data corruption
+
+**Debugging approach:**
+```bash
+# Use memcheck with extra checks
+make memcheck MEMCHECK_FLAGS="--track-origins=yes --read-var-info=yes"
+```
+
+### Deadlocks
+
+**Symptoms:**
+- Program hangs
+- No CPU usage
+- Threads waiting indefinitely
+
+**Debugging approach:**
+```bash
+# Use helgrind
+make helgrind
+
+# Or attach gdb to hanging process
+gdb -p <pid>
+(gdb) info threads
+(gdb) thread apply all bt
+```
+
+### Performance Issues
+
+**Symptoms:**
+- Slow execution
+- High CPU usage
+- Memory usage growing
+
+**Debugging approach:**
+```bash
+# Check for memory leaks
+make memcheck
+
+# Profile with valgrind's callgrind
+valgrind --tool=callgrind ./bin/<module>.out
+kcachegrind callgrind.out.<pid>
+
+# Check log levels (debug logging can be slow)
+log_level_as_string(logger); // Should be INFO or higher in production
+```
+
+## Development Daemon Mode
+
+Automatically rebuild and restart on code changes:
+
+```bash
+make daemon
+```
+
+This watches the `src/` directory and runs `make start` on any change.
+
+<Note>
+  Requires `entr` to be installed: `sudo apt-get install entr`
+</Note>
+
+**Workflow:**
+```bash
+# Terminal 1: Auto-rebuild and run
+make daemon
+
+# Terminal 2: Edit code
+vim src/main.c
+
+# Module automatically rebuilds and restarts on save
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Learn about writing and running tests
+  </Card>
+  <Card title="Building" icon="hammer" href="/development/building">
+    Understand the build system in depth
+  </Card>
+</CardGroup>

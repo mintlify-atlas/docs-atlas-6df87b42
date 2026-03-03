@@ -1,0 +1,193 @@
+---
+title: 'Filesystem Configuration'
+description: 'Configuration parameters for the Filesystem module'
+---
+
+The Filesystem module manages file storage and swap space using a FAT-based file system with block allocation.
+
+## Configuration File
+
+The Filesystem module reads its configuration from a `.config` file passed as a command-line argument:
+
+```bash
+./filesystem filesystem.config
+```
+
+## Configuration Parameters
+
+### Module Connection Parameters
+
+<ParamField path="IP_MEMORIA" type="string" required>
+  IP address of the Memory module.
+  
+  The Filesystem connects to Memory for direct memory access during file read/write operations.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_MEMORIA" type="integer" required>
+  Port number where the Memory module is listening.
+  
+  **Example:** `8002`
+</ParamField>
+
+<ParamField path="PUERTO_ESCUCHA" type="integer" required>
+  Port number where Filesystem will listen for incoming connections from Memory and Kernel.
+  
+  **Example:** `8003`
+</ParamField>
+
+### Filesystem Structure Parameters
+
+<ParamField path="PATH_FAT" type="string" required>
+  Path to the File Allocation Table (FAT) file.
+  
+  The FAT stores the block chain for each file. Each entry is a 32-bit unsigned integer pointing to the next block or EOF.
+  
+  **Example:** `./fs/fat.dat`
+</ParamField>
+
+<ParamField path="PATH_BLOQUES" type="string" required>
+  Path to the blocks data file.
+  
+  This file contains all data blocks for both swap and file storage.
+  
+  **Example:** `./fs/bloques.dat`
+</ParamField>
+
+<ParamField path="PATH_FCB" type="string" required>
+  Path to the directory containing File Control Blocks (FCBs).
+  
+  Each file has its own FCB (`.fcb` file) storing metadata like filename, size, and initial block.
+  
+  **Example:** `./fs/fcbs`
+</ParamField>
+
+### Block Management Parameters
+
+<ParamField path="CANT_BLOQUES_TOTAL" type="integer" required>
+  Total number of blocks in the filesystem.
+  
+  This includes both swap blocks and file storage blocks.
+  
+  **Example:** `4096`
+</ParamField>
+
+<ParamField path="CANT_BLOQUES_SWAP" type="integer" required>
+  Number of blocks reserved for swap space.
+  
+  These blocks are used by Memory module for page swapping. Must be less than CANT_BLOQUES_TOTAL.
+  
+  **Example:** `1024`
+</ParamField>
+
+<ParamField path="TAM_BLOQUE" type="integer" required>
+  Size of each block in bytes.
+  
+  Should match TAM_PAGINA in Memory configuration for efficient swapping.
+  
+  **Example:** `16` (16 bytes per block)
+</ParamField>
+
+### Performance Parameters
+
+<ParamField path="RETARDO_ACCESO_BLOQUE" type="integer" required>
+  Delay in milliseconds for block access operations.
+  
+  Simulates disk access time for reading/writing data blocks.
+  
+  **Example:** `2500` (2.5 seconds)
+</ParamField>
+
+<ParamField path="RETARDO_ACCESO_FAT" type="integer" required>
+  Delay in milliseconds for FAT access operations.
+  
+  Simulates time to read/write FAT entries. Typically faster than block access.
+  
+  **Example:** `500` (0.5 seconds)
+</ParamField>
+
+## Configuration Example
+
+```properties
+IP_MEMORIA=127.0.0.1
+PUERTO_MEMORIA=8002
+PUERTO_ESCUCHA=8003
+PATH_FAT=./fs/fat.dat
+PATH_BLOQUES=./fs/bloques.dat
+PATH_FCB=./fs/fcbs
+CANT_BLOQUES_TOTAL=4096
+CANT_BLOQUES_SWAP=1024
+TAM_BLOQUE=16
+RETARDO_ACCESO_BLOQUE=2500
+RETARDO_ACCESO_FAT=500
+```
+
+## Filesystem Structure
+
+The MAPPA filesystem uses a FAT-based structure:
+
+### Block Layout
+```
+Blocks:  [0 - 1023]         [1024 - 4095]
+         Swap Space         File Storage
+```
+
+### FAT (File Allocation Table)
+- Each entry is a 32-bit unsigned integer
+- Points to the next block in the file chain
+- Value `0xFFFFFFFF` indicates end of file
+- Entry 0 is reserved for boot block
+
+### FCB (File Control Block)
+Each `.fcb` file contains:
+- `NOMBRE_ARCHIVO` - Filename
+- `TAMANIO_ARCHIVO` - File size in bytes
+- `BLOQUE_INICIAL` - First block number in the chain
+
+## Storage Capacity
+
+With the example configuration:
+
+- **Swap capacity:** 1024 blocks × 16 bytes = 16,384 bytes (16 KB)
+- **File capacity:** 3072 blocks × 16 bytes = 49,152 bytes (48 KB)
+- **Total capacity:** 4096 blocks × 16 bytes = 65,536 bytes (64 KB)
+- **FAT size:** 4096 entries × 4 bytes = 16,384 bytes (16 KB)
+
+## File Operations
+
+The Filesystem supports the following operations:
+
+- **F_OPEN** - Open file for reading or writing
+- **F_CLOSE** - Close an open file
+- **F_READ** - Read from file at current pointer
+- **F_WRITE** - Write to file at current pointer
+- **F_SEEK** - Move file pointer to position
+- **F_TRUNCATE** - Resize file (expand or shrink)
+
+## Swap Operations
+
+Swap space operations (used by Memory):
+
+- **Reserve blocks** - Allocate swap blocks for a process
+- **Read swap** - Load page from swap to memory
+- **Write swap** - Save modified page to swap
+- **Free blocks** - Release swap blocks when process terminates
+
+## Notes
+
+<Note>
+  The first block (block 0) is reserved as a boot block and should not be used for file storage.
+</Note>
+
+<Warning>
+  Ensure that CANT_BLOQUES_SWAP is less than CANT_BLOQUES_TOTAL and that there are enough file blocks for your workload.
+</Warning>
+
+<Tip>
+  Set TAM_BLOQUE equal to the Memory module's TAM_PAGINA for optimal swap performance. This allows entire pages to fit in single blocks.
+</Tip>
+
+<Info>
+  The RETARDO_ACCESO parameters simulate realistic disk access times. Higher values create more realistic scenarios but slower execution.
+</Info>

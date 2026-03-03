@@ -1,0 +1,298 @@
+---
+title: Building the Project
+description: Build instructions for MAPPA OS Simulator modules
+---
+
+## Project Structure
+
+The MAPPA OS Simulator is organized into independent modules, each with its own build system:
+
+- **cpu/** - CPU scheduling simulator
+- **memoria/** - Memory management module
+- **kernel/** - Core kernel module with console interface
+- **filesystem/** - Virtual filesystem implementation
+- **utils/** - Shared utility library (static library)
+
+Each module follows a consistent directory structure:
+
+```
+<module>/
+├── src/           # Source files (*.c, *.h)
+├── tests/         # Test files (if available)
+├── config/        # Configuration files
+├── obj/           # Compiled object files (generated)
+├── bin/           # Output binaries (generated)
+├── makefile       # Build system
+└── settings.mk    # Module-specific settings
+```
+
+## Makefile System
+
+Each module uses a unified makefile system with consistent targets and behavior:
+
+### Core Build Targets
+
+<CodeGroup>
+```bash Debug Build (Default)
+make debug
+```
+
+```bash Release Build
+make release
+```
+
+```bash Build All (Debug + Tests)
+make all
+```
+
+```bash Clean Build Artifacts
+make clean
+```
+</CodeGroup>
+
+### Build Modes
+
+**Debug Mode** (default):
+- Enabled with `make debug`
+- Compiler flags: `-g -Wall -DDEBUG -fcommon -fdiagnostics-color=always`
+- Includes debugging symbols
+- Defines `DEBUG` macro
+- Optimizations disabled
+
+**Release Mode**:
+- Enabled with `make release`
+- Compiler flags: `-O3 -Wall -DNDEBUG -fcommon`
+- Full optimizations (`-O3`)
+- Defines `NDEBUG` macro
+- No debugging symbols
+
+## Building Individual Modules
+
+Each module can be built independently:
+
+<CodeGroup>
+```bash CPU Module
+cd cpu
+make debug
+# Output: bin/cpu.out
+```
+
+```bash Memory Module
+cd memoria
+make debug
+# Output: bin/memoria.out
+```
+
+```bash Kernel Module
+cd kernel
+make debug
+# Output: bin/kernel.out
+```
+
+```bash Filesystem Module
+cd filesystem
+make debug
+# Output: bin/filesystem.out
+```
+
+```bash Utils Library
+cd utils
+make debug
+# Output: bin/libutils.a (static library)
+```
+</CodeGroup>
+
+## Compilation Process
+
+### Source Discovery
+
+The makefile automatically discovers source files:
+
+```makefile
+SRCS_C = $(shell find src/ -iname "*.c")
+SRCS_H = $(shell find src/ -iname "*.h")
+```
+
+### Object File Generation
+
+Source files are compiled to object files:
+
+```makefile
+OBJS = $(patsubst src/%.c,obj/%.o,$(SRCS_C))
+```
+
+Example: `src/main.c` → `obj/main.o`
+
+### Binary Linking
+
+Object files are linked with dependencies:
+
+```bash
+gcc $(CFLAGS) -o bin/<module>.out obj/*.o -I../utils/src -L../utils/bin -lutils -lcommons
+```
+
+## Dependencies
+
+### System Libraries
+
+All modules link against:
+- **commons** - So-commons-library (UTN-provided utilities)
+- **pthread** - POSIX threads (implicit)
+
+### Module-Specific Libraries
+
+<Tabs>
+  <Tab title="CPU">
+    ```makefile
+    LIBS=utils commons
+    STATIC_LIBPATHS=../utils
+    ```
+  </Tab>
+  <Tab title="Memoria">
+    ```makefile
+    LIBS=utils commons
+    STATIC_LIBPATHS=../utils
+    ```
+  </Tab>
+  <Tab title="Kernel">
+    ```makefile
+    LIBS=utils commons readline
+    STATIC_LIBPATHS=../utils
+    ```
+    Kernel also requires **readline** for console interface.
+  </Tab>
+  <Tab title="Filesystem">
+    ```makefile
+    LIBS=utils commons
+    STATIC_LIBPATHS=../utils
+    ```
+  </Tab>
+</Tabs>
+
+### Dependency Resolution
+
+The makefile automatically rebuilds dependencies when needed:
+
+```makefile
+DEPS = $(foreach STL,$(STATIC_LIBPATHS),$(STL:%=%/bin/lib$(notdir $(STL)).a))
+
+obj/%.o: src/%.c $(SRCS_H) $(DEPS)
+```
+
+If `utils` is modified, dependent modules are automatically recompiled.
+
+## Building the Entire System
+
+To build all modules in the correct order:
+
+```bash
+# Option 1: Build each module
+cd utils && make debug
+cd ../cpu && make debug
+cd ../memoria && make debug
+cd ../kernel && make debug
+cd ../filesystem && make debug
+
+# Option 2: Use a script (if available)
+./build-all.sh
+```
+
+<Note>
+  The **utils** library must be built first, as all other modules depend on it.
+</Note>
+
+## Compiler Configuration
+
+### Common Flags
+
+- `-g` - Generate debug information
+- `-Wall` - Enable all warnings
+- `-fcommon` - Allow common variables (legacy compatibility)
+- `-fdiagnostics-color=always` - Colorized compiler output
+- `-O3` - Maximum optimization (release only)
+
+### Include Paths
+
+```makefile
+IDIRS = $(addsuffix /src,$(SHARED_LIBPATHS) $(STATIC_LIBPATHS) .)
+# Example: -I../utils/src -I./src
+```
+
+### Library Paths
+
+```makefile
+LIBDIRS = $(addsuffix /bin,$(SHARED_LIBPATHS) $(STATIC_LIBPATHS))
+# Example: -L../utils/bin
+```
+
+### Runtime Paths (rpath)
+
+For shared libraries, the makefile sets runtime search paths:
+
+```makefile
+RUNDIRS = $(SHARED_LIBPATHS:%=$(shell cd . && pwd)/%/bin)
+# Example: -Wl,-rpath,/home/user/mappa/utils/bin
+```
+
+## Watch Mode
+
+Automatically rebuild when source files change:
+
+```bash
+make watch
+```
+
+This uses `entr` to monitor the `src/` directory and rebuilds on any change.
+
+<Note>
+  Requires `entr` to be installed: `sudo apt-get install entr`
+</Note>
+
+## Troubleshooting
+
+### Compilation Errors
+
+**Missing headers:**
+```bash
+fatal error: utils/logger.h: No such file or directory
+```
+
+**Solution:** Ensure utils is built first:
+```bash
+cd ../utils && make debug
+```
+
+**Undefined references:**
+```bash
+undefined reference to `log_create'
+```
+
+**Solution:** Check library linkage in `settings.mk`:
+```makefile
+LIBS=utils commons
+STATIC_LIBPATHS=../utils
+```
+
+### Build Artifacts
+
+If builds are inconsistent, clean and rebuild:
+
+```bash
+make clean
+make debug
+```
+
+This removes:
+- `obj/` directory (object files)
+- `bin/` directory (binaries)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Learn how to run tests and verify your build
+  </Card>
+  <Card title="Debugging" icon="bug" href="/development/debugging">
+    Debug your code with valgrind and logging
+  </Card>
+</CardGroup>

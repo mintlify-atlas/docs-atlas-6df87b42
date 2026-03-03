@@ -1,0 +1,505 @@
+---
+title: 'CPU Instruction Set'
+description: 'Complete reference for all CPU instructions in the MAPPA OS Simulator'
+---
+
+# CPU Instruction Set
+
+The CPU module implements a complete instruction set for process execution, including arithmetic operations, memory access, resource management, and file system operations.
+
+## Data Structures
+
+### Instruccion
+
+Represents a single CPU instruction.
+
+```c
+typedef struct {
+    char *opcode;      // Operation code (e.g., "SET", "SUM", "MOV_IN")
+    char *operando1;   // First operand
+    char *operando2;   // Second operand
+} Instruccion;
+```
+
+### DireccionFisica
+
+Represents a physical memory address with frame and offset.
+
+```c
+typedef struct {
+    int marco;          // Frame number
+    int desplazamiento; // Offset within the frame
+} DireccionFisica;
+```
+
+## Arithmetic Instructions
+
+### SET
+
+Sets a register to a constant value.
+
+**Syntax:** `SET (Register, Value)`
+
+**Parameters:**
+- `Register`: Destination register (AX, BX, CX, or DX)
+- `Value`: Integer value to set
+
+**Implementation:**
+```c
+void setInstruccion(pcb* contexto, Instruccion instruccion, t_log* logger)
+```
+
+**Behavior:**
+- Locates the destination register in the PCB context
+- Converts the value string to integer using `atoi()`
+- Stores the value in the register
+- Logs an error if the register is not recognized
+
+**Source:** `instrucciones.c:33-45`
+
+---
+
+### SUM
+
+Adds the value of one register to another.
+
+**Syntax:** `SUM (DestRegister, SourceRegister)`
+
+**Parameters:**
+- `DestRegister`: Destination register (result stored here)
+- `SourceRegister`: Source register (value to add)
+
+**Implementation:**
+```c
+void sumInstruccion(pcb* contexto, Instruccion instruccion, t_log* logger)
+```
+
+**Behavior:**
+- Retrieves both registers from the PCB context
+- Performs addition: `*dest = *dest + *source`
+- Updates the destination register with the sum
+- Logs an error if either register is not recognized
+
+**Source:** `instrucciones.c:47-60`
+
+---
+
+### SUB
+
+Subtracts the value of one register from another.
+
+**Syntax:** `SUB (DestRegister, SourceRegister)`
+
+**Parameters:**
+- `DestRegister`: Destination register (result stored here)
+- `SourceRegister`: Source register (value to subtract)
+
+**Implementation:**
+```c
+void subInstruccion(pcb* contexto, Instruccion instruccion, t_log* logger)
+```
+
+**Behavior:**
+- Retrieves both registers from the PCB context
+- Performs subtraction: `*dest = *dest - *source`
+- Updates the destination register with the difference
+- Logs an error if either register is not recognized
+
+**Source:** `instrucciones.c:62-75`
+
+---
+
+## Memory Access Instructions
+
+### MOV_IN
+
+Reads a value from memory and stores it in a register.
+
+**Syntax:** `MOV_IN (Register, LogicalAddress)`
+
+**Parameters:**
+- `Register`: Destination register (AX, BX, CX, or DX)
+- `LogicalAddress`: Logical memory address to read from
+
+**Implementation:**
+```c
+void movInInstruccion(pcb* contexto, Instruccion instruccion, 
+                      DireccionFisica direccionFisica, t_log* logger, int fd_memoria)
+```
+
+**Behavior:**
+1. Retrieves the destination register from the PCB
+2. Creates a packet with operation code `MOV_IN`
+3. Adds the physical frame number and offset to the packet
+4. Sends the packet to the Memory module via `fd_memoria`
+5. Waits for the Memory module to return the value
+6. Stores the received value in the destination register
+7. Logs: `"PID: X - Acción: LEER - Dirección Física: frame | offset - Valor: value"`
+
+**Source:** `instrucciones.c:120-143`
+
+---
+
+### MOV_OUT
+
+Writes a register value to memory.
+
+**Syntax:** `MOV_OUT (LogicalAddress, Register)`
+
+**Parameters:**
+- `LogicalAddress`: Logical memory address to write to
+- `Register`: Source register containing the value
+
+**Implementation:**
+```c
+void movOutInstruccion(pcb* contexto, Instruccion instruccion, 
+                       DireccionFisica direccionFisica, int fd_memoria, t_log* logger)
+```
+
+**Behavior:**
+1. Retrieves the source register value from the PCB
+2. Verifies the physical address is valid (`marco >= 0`)
+3. Creates a packet with operation code `MOV_OUT`
+4. Adds the frame number, offset, and register value to the packet
+5. Sends the packet to the Memory module
+6. Logs: `"PID: X - Acción: ESCRIBIR - Dirección Física: frame | offset - Valor: value"`
+
+**Source:** `instrucciones.c:144-164`
+
+---
+
+## Control Flow Instructions
+
+### JNZ
+
+Conditional jump - updates the program counter if a register is non-zero.
+
+**Syntax:** `JNZ (Register, InstructionNumber)`
+
+**Parameters:**
+- `Register`: Register to test (AX, BX, CX, or DX)
+- `InstructionNumber`: Instruction number to jump to
+
+**Implementation:**
+```c
+void jnzInstruccion(pcb* contexto, Instruccion instruccion, t_log* logger)
+```
+
+**Behavior:**
+- Retrieves the register value from the PCB
+- If the value is not zero, updates `contexto->pc` to the instruction number
+- If the value is zero, execution continues sequentially
+- Logs an error if the register is not recognized
+
+**Source:** `instrucciones.c:77-90`
+
+---
+
+### EXIT
+
+Terminates process execution.
+
+**Syntax:** `EXIT`
+
+**Parameters:** None
+
+**Implementation:**
+```c
+void exitInstruccion(pcb* contexto, Instruccion instruccion, 
+                     t_log* logger, int fd_cpu_dispatch)
+```
+
+**Behavior:**
+1. Logs the EXIT instruction execution
+2. Sends the updated PCB context to the Kernel via dispatch
+3. Includes operation type "EXIT" in the desalojo (eviction) packet
+4. Sets `ya_desalojo = true` and `flag_ciclo = false` to stop execution
+5. The Kernel receives the PCB and finalizes the process
+
+**Source:** `instrucciones.c:114-118`
+
+---
+
+## Blocking Instructions
+
+### SLEEP
+
+Blocks the process for a specified time.
+
+**Syntax:** `SLEEP (Seconds)`
+
+**Parameters:**
+- `Seconds`: Number of seconds to sleep
+
+**Implementation:**
+```c
+void sleepInstruccion(pcb* contexto, Instruccion instruccion, 
+                      t_log* logger, int fd_dispatch)
+```
+
+**Behavior:**
+1. Logs the SLEEP instruction execution
+2. Logs the current program counter at eviction time
+3. Sends the updated PCB to the Kernel with "SLEEP" type
+4. Includes the sleep duration in the extra data field
+5. Sets `ya_desalojo = true` and `flag_ciclo = false`
+6. The Kernel blocks the process for the specified duration
+
+**Source:** `instrucciones.c:92-98`
+
+---
+
+### WAIT
+
+Requests a resource instance.
+
+**Syntax:** `WAIT (Resource)`
+
+**Parameters:**
+- `Resource`: Name of the resource to acquire
+
+**Implementation:**
+```c
+void waitInstruccion(pcb* contexto, Instruccion instruccion, 
+                     t_log* logger, int fd_dispatch)
+```
+
+**Behavior:**
+1. Logs the WAIT instruction execution
+2. Sends the PCB to the Kernel with "WAIT" type
+3. Includes the resource name in the packet
+4. Sets `ya_desalojo = true` and `flag_ciclo = false`
+5. The Kernel decrements the resource counter
+6. If the resource is unavailable, the process is blocked
+
+**Source:** `instrucciones.c:100-105`
+
+---
+
+### SIGNAL
+
+Releases a resource instance.
+
+**Syntax:** `SIGNAL (Resource)`
+
+**Parameters:**
+- `Resource`: Name of the resource to release
+
+**Implementation:**
+```c
+void signalInstruccion(pcb* contexto, Instruccion instruccion, 
+                       t_log* logger, int fd_dispatch)
+```
+
+**Behavior:**
+1. Logs the SIGNAL instruction execution
+2. Sends the PCB to the Kernel with "SIGNAL" type
+3. Includes the resource name in the packet
+4. Sets `ya_desalojo = true` and `flag_ciclo = false`
+5. The Kernel increments the resource counter
+6. May unblock processes waiting for this resource
+
+**Source:** `instrucciones.c:107-112`
+
+---
+
+## File System Instructions
+
+### F_OPEN
+
+Opens a file with the specified access mode.
+
+**Syntax:** `F_OPEN (FileName, AccessMode)`
+
+**Parameters:**
+- `FileName`: Name of the file to open
+- `AccessMode`: Access mode (e.g., "r", "w", "rw")
+
+**Implementation:**
+```c
+void fOpenInstruccion(pcb* contexto, Instruccion instruccion, 
+                      int fd_cpu_dispatch, t_log* logger)
+```
+
+**Behavior:**
+1. Logs the F_OPEN instruction execution
+2. Creates a packet with operation code `F_OPEN`
+3. Packs the PCB context using `empaquetar_pcb()`
+4. Adds the file name and access mode to the packet
+5. Sends the packet to the Kernel via dispatch
+6. Sets `flag_ciclo = false` to yield CPU
+7. The Kernel manages file opening and access control
+
+**Source:** `instrucciones.c:166-179`
+
+---
+
+### F_CLOSE
+
+Closes an open file.
+
+**Syntax:** `F_CLOSE (FileName)`
+
+**Parameters:**
+- `FileName`: Name of the file to close
+
+**Implementation:**
+```c
+void fCloseInstruccion(pcb* contexto, Instruccion instruccion, 
+                       int fd_cpu_dispatch, t_log* logger)
+```
+
+**Behavior:**
+1. Logs the F_CLOSE instruction execution
+2. Creates a packet with operation code `F_CLOSE`
+3. Packs the PCB context
+4. Adds the file name to the packet
+5. Sends to Kernel via dispatch
+6. Sets `ya_desalojo = true` and `flag_ciclo = false`
+
+**Source:** `instrucciones.c:181-191`
+
+---
+
+### F_SEEK
+
+Updates the file pointer position.
+
+**Syntax:** `F_SEEK (FileName, Position)`
+
+**Parameters:**
+- `FileName`: Name of the open file
+- `Position`: New file pointer position (integer)
+
+**Implementation:**
+```c
+void fSeekInstruccion(pcb* contexto, Instruccion instruccion, 
+                      DireccionFisica direccionFisica, int fd_cpu_dispatch, t_log* logger)
+```
+
+**Behavior:**
+1. Converts the position string to integer using `atoi()`
+2. Creates a packet with operation code `F_SEEK`
+3. Packs the PCB, file name, and position
+4. Sends to Kernel
+5. Sets `ya_desalojo = true` and `flag_ciclo = false`
+6. The Kernel updates the file pointer for this process
+
+**Source:** `instrucciones.c:193-206`
+
+---
+
+### F_READ
+
+Reads from a file and writes to memory.
+
+**Syntax:** `F_READ (FileName, LogicalAddress)`
+
+**Parameters:**
+- `FileName`: Name of the file to read from
+- `LogicalAddress`: Memory address to write the data to
+
+**Implementation:**
+```c
+void fReadInstruccion(pcb* contexto, Instruccion instruccion, 
+                      DireccionFisica direccionFisica, int fd_cpu_dispatch, 
+                      int fd_memoria, t_log* logger)
+```
+
+**Behavior:**
+1. Translates the logical address to physical (frame + offset)
+2. Creates a packet with operation code `F_READ`
+3. Packs the PCB, file name, frame number, and offset
+4. Sends to Kernel
+5. Sets `ya_desalojo = true` and `flag_ciclo = false`
+6. The Kernel coordinates with File System to read data
+7. Data is written to the specified physical memory location
+
+**Source:** `instrucciones.c:208-220`
+
+---
+
+### F_WRITE
+
+Writes memory data to a file.
+
+**Syntax:** `F_WRITE (FileName, LogicalAddress)`
+
+**Parameters:**
+- `FileName`: Name of the file to write to
+- `LogicalAddress`: Memory address to read the data from
+
+**Implementation:**
+```c
+void fWriteInstruccion(pcb* contexto, Instruccion instruccion, 
+                       DireccionFisica direccionFisica, int fd_cpu_dispatch, 
+                       int fd_memoria, t_log* logger)
+```
+
+**Behavior:**
+1. Translates the logical address to physical (frame + offset)
+2. Creates a packet with operation code `F_WRITE`
+3. Packs the PCB, file name, frame number, and offset
+4. Sends to Kernel
+5. Sets `ya_desalojo = true` and `flag_ciclo = false`
+6. The Kernel reads data from the physical memory location
+7. Data is written to the file via File System module
+
+**Source:** `instrucciones.c:222-233`
+
+---
+
+### F_TRUNCATE
+
+Resizes a file to the specified size.
+
+**Syntax:** `F_TRUNCATE (FileName, Size)`
+
+**Parameters:**
+- `FileName`: Name of the file to truncate
+- `Size`: New file size in bytes (integer)
+
+**Implementation:**
+```c
+void fTruncateInstruccion(pcb* contexto, Instruccion instruccion, 
+                          int fd_cpu_dispatch, t_log* logger)
+```
+
+**Behavior:**
+1. Converts the size string to integer using `atoi()`
+2. Creates a packet with operation code `F_TRUNCATE`
+3. Packs the PCB, file name, and new size
+4. Sends to Kernel
+5. Sets `ya_desalojo = true` and `flag_ciclo = false`
+6. The Kernel resizes the file via File System module
+
+**Source:** `instrucciones.c:235-247`
+
+---
+
+## Helper Functions
+
+### obtener_registro
+
+Retrieves a register pointer by name.
+
+**Signature:**
+```c
+uint32_t* obtener_registro(pcb* contexto, char* nombre_registro)
+```
+
+**Parameters:**
+- `contexto`: PCB context containing the registers
+- `nombre_registro`: Register name ("AX", "BX", "CX", or "DX")
+
+**Returns:**
+- Pointer to the register in the PCB
+- `NULL` if the register name is not recognized
+
+**Supported Registers:**
+- `"AX"` - General purpose register A
+- `"BX"` - General purpose register B
+- `"CX"` - General purpose register C
+- `"DX"` - General purpose register D
+
+**Source:** `instrucciones.c:250-262`

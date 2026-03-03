@@ -1,0 +1,274 @@
+---
+title: 'Swap Space API'
+description: 'Swap space management functions for the MAPPA OS memory subsystem'
+---
+
+## Overview
+
+The Swap Space API provides functions for managing swap blocks in the MAPPA OS filesystem. Swap space is used by the memory module to page out process data to disk when physical memory is full. These functions handle reservation and liberation of contiguous swap blocks.
+
+## Swap Space Architecture
+
+The MAPPA OS filesystem reserves a dedicated portion of the blocks file for swap space:
+
+- **Swap blocks**: Located at the beginning of the blocks file (blocks 0 to `cant_bloques_swap - 1`)
+- **File blocks**: Follow after swap space (blocks `cant_bloques_swap` to `cant_bloques_total - 1`)
+- **Bitmap management**: Separate bitmap (`bitmapSwap`) tracks swap block allocation
+- **Integration**: Swap API works with the memory module for paging operations
+
+## Functions
+
+### reservar_bloquesSWAP
+
+```c
+bool reservar_bloquesSWAP(int cant_bloques, int bloques_reservados[], bool* bitmap);
+```
+
+Reserves multiple contiguous or non-contiguous swap blocks for paging.
+
+**Parameters:**
+- `cant_bloques`: Number of swap blocks to reserve
+- `bloques_reservados`: Output array to store reserved block numbers (must be pre-allocated with size >= `cant_bloques`)
+- `bitmap`: Swap bitmap array for tracking allocation
+
+**Returns:**
+- `true`: Successfully reserved the requested number of blocks
+- `false`: Not enough free swap blocks available, or error opening blocks file
+
+**Behavior:**
+- First checks if sufficient swap blocks are available (`swapLibres >= cant_bloques`)
+- Opens the blocks file in `rb+` mode
+- Scans the file sequentially from the beginning
+- For each block containing "0" (free marker):
+  - Marks the block as reserved by clearing its contents (writes "\0")
+  - Records block number in `bloques_reservados` array
+  - Sets `bitmap[block_number]` to 1 (occupied)
+  - Decrements global `swapLibres` counter
+  - Logs: "BLOQUES RESERVADOS: X"
+- Continues until `cant_bloques` blocks are reserved
+- Automatically closes the blocks file
+
+**Note:** Access delay (`retardo_acceso_bloque`) is commented out in the implementation for performance.
+
+**Location:** `filesystem/src/main.c:54`
+
+---
+
+### liberar_bloquesSWAP
+
+```c
+bool liberar_bloquesSWAP(int bloques[], int cantidad, bool* bitmap);
+```
+
+Frees multiple swap blocks, making them available for future allocation.
+
+**Parameters:**
+- `bloques`: Array of block numbers to free
+- `cantidad`: Number of blocks in the array
+- `bitmap`: Swap bitmap array for tracking allocation
+
+**Returns:**
+- `true`: Successfully freed all blocks
+- `false`: Error opening blocks file
+
+**Behavior:**
+- Opens blocks file in `rb+` mode
+- For each block in the `bloques` array:
+  - Seeks to block position (`tam_bloque * bloques[i]`)
+  - Applies `retardo_acceso_bloque` delay (simulates disk access time)
+  - Writes "0" to mark block as free
+  - Sets `bitmap[bloques[i]]` to 0 (free)
+  - Increments global `swapLibres` counter
+  - Logs: "ACCESO A BLOQUE SWAP NRO: X"
+- Automatically closes the blocks file and frees temporary memory
+
+**Location:** `filesystem/src/main.c:30`
+
+---
+
+## Bitmap Management
+
+The swap space uses a dedicated bitmap for tracking block allocation:
+
+```c
+bool* bitmapSwap = malloc(sizeof(bool) * cant_bloques_swap);
+inicializarBitMap(bitmapSwap, cant_bloques_swap);
+```
+
+**Bitmap states:**
+- `0`: Block is free and available for allocation
+- `1`: Block is occupied/reserved
+
+**Synchronization:**
+- The bitmap is synchronized with the blocks file during `iniciar_bloques()`
+- Blocks containing "0" are marked as free in the bitmap
+- All other blocks are marked as occupied
+
+## Integration with Memory Module
+
+The Swap API is designed to work with the memory module's paging system:
+
+1. **Page Out**: When memory is full, the memory module calls `reservar_bloquesSWAP()` to allocate swap blocks
+2. **Write to Swap**: Memory module uses `escribir_bloque_void()` to write page contents to reserved blocks
+3. **Read from Swap**: Memory module uses `leer_bloque()` to read pages back into memory
+4. **Page In**: After reading, memory module calls `liberar_bloquesSWAP()` to free the swap blocks
+
+## Usage Example
+
+```c
+// Initialize swap bitmap
+bool* bitmapSwap = malloc(sizeof(bool) * cant_bloques_swap);
+inicializarBitMap(bitmapSwap, cant_bloques_swap);
+
+// Check if enough swap space is available
+int pages_needed = 4;
+if (swapLibres >= pages_needed) {
+    // Reserve swap blocks for paging out
+    int* bloques = malloc(sizeof(int) * pages_needed);
+    if (reservar_bloquesSWAP(pages_needed, bloques, bitmapSwap)) {
+        log_info(logger, "Reserved %d swap blocks", pages_needed);
+        
+        // Write page data to each block
+        for (int i = 0; i < pages_needed; i++) {
+            void* page_data = get_page_data(i);
+            escribir_bloque_void(bloques[i], page_data);
+        }
+        
+        // Later, when paging back in...
+        
+        // Read page data from swap
+        for (int i = 0; i < pages_needed; i++) {
+            void* page_data = leer_bloque(bloques[i]);
+            restore_page(i, page_data);
+            free(page_data);
+        }
+        
+        // Free the swap blocks
+        liberar_bloquesSWAP(bloques, pages_needed, bitmapSwap);
+        log_info(logger, "Freed %d swap blocks", pages_needed);
+        
+        free(bloques);
+    }
+} else {
+    log_error(logger, "Not enough swap space available");
+}
+```
+
+## Advanced Example: Process Swap Out
+
+```c
+// Swap out a process's pages to disk
+bool swap_out_process(int pid, int num_pages) {
+    // Allocate array for swap block numbers
+    int* swap_blocks = malloc(sizeof(int) * num_pages);
+    
+    // Reserve swap blocks
+    if (!reservar_bloquesSWAP(num_pages, swap_blocks, bitmapSwap)) {
+        log_error(logger, "PID %d: Failed to allocate swap space", pid);
+        free(swap_blocks);
+        return false;
+    }
+    
+    // Write each page to its swap block
+    for (int i = 0; i < num_pages; i++) {
+        void* page_data = get_process_page(pid, i);
+        escribir_bloque_void(swap_blocks[i], page_data);
+        log_info(logger, "PID %d: Page %d -> Swap block %d", 
+                 pid, i, swap_blocks[i]);
+    }
+    
+    // Store swap block mapping for later retrieval
+    save_swap_mapping(pid, swap_blocks, num_pages);
+    
+    free(swap_blocks);
+    return true;
+}
+
+// Swap in a process's pages from disk
+bool swap_in_process(int pid) {
+    // Retrieve swap block mapping
+    int num_pages;
+    int* swap_blocks = get_swap_mapping(pid, &num_pages);
+    
+    // Read each page from swap
+    for (int i = 0; i < num_pages; i++) {
+        void* page_data = leer_bloque(swap_blocks[i]);
+        restore_process_page(pid, i, page_data);
+        free(page_data);
+        log_info(logger, "PID %d: Page %d <- Swap block %d", 
+                 pid, i, swap_blocks[i]);
+    }
+    
+    // Free swap blocks
+    liberar_bloquesSWAP(swap_blocks, num_pages, bitmapSwap);
+    clear_swap_mapping(pid);
+    
+    free(swap_blocks);
+    return true;
+}
+```
+
+## Global Variables
+
+The Swap API maintains this global counter:
+
+- `swapLibres`: Number of available swap blocks (updated by `reservar_bloquesSWAP` and `liberar_bloquesSWAP`)
+
+## Performance Considerations
+
+**Delays:**
+- `liberar_bloquesSWAP`: Applies `retardo_acceso_bloque` delay for each block freed
+- `reservar_bloquesSWAP`: Delay is commented out for faster allocation
+
+**Sequential Search:**
+- `reservar_bloquesSWAP` performs sequential scan of blocks file
+- For better performance with large swap spaces, consider implementing a free list
+
+**Batch Operations:**
+- Both functions support batch operations to reduce overhead
+- Reserve/free multiple blocks in a single call rather than one at a time
+
+## Error Handling
+
+```c
+// Always check return values
+if (!reservar_bloquesSWAP(count, blocks, bitmap)) {
+    // Handle error: not enough swap space or I/O error
+    log_error(logger, "Swap allocation failed: %d blocks needed, %d available",
+              count, swapLibres);
+    return -1;
+}
+
+// Check available space before attempting allocation
+if (swapLibres < required_blocks) {
+    log_warning(logger, "Insufficient swap space");
+    // Trigger cleanup or process termination
+}
+```
+
+## Related APIs
+
+- [Block Management API](/api/filesystem/blocks) - For block I/O operations (`leer_bloque`, `escribir_bloque_void`)
+- [FAT API](/api/filesystem/fat) - For file block chain management
+
+## Configuration
+
+The Swap Space API uses the following configuration values:
+
+- `PATH_BLOQUES`: Path to the blocks file (contains both swap and file blocks)
+- `CANT_BLOQUES_SWAP`: Number of blocks reserved for swap space
+- `CANT_BLOQUES_TOTAL`: Total number of blocks in the filesystem
+- `TAM_BLOQUE`: Size of each block in bytes (typically matches memory page size)
+- `RETARDO_ACCESO_BLOQUE`: Delay in milliseconds for each block access
+
+## Design Notes
+
+**Free Block Marker:**
+- Free swap blocks are marked with "0" (ASCII character)
+- Reserved blocks are cleared to "\0" (null terminator)
+- This allows quick identification of free blocks during sequential scan
+
+**Bitmap vs. File State:**
+- The bitmap provides fast in-memory lookup for allocation status
+- The blocks file stores the persistent state
+- Both must be kept synchronized for consistency

@@ -1,0 +1,437 @@
+---
+title: 'Paging API'
+description: 'Memory paging system API reference including page tables, address translation, and page fault handling'
+---
+
+## Overview
+
+The paging API provides functions for managing virtual memory through page tables, translating logical addresses to physical frames, and handling page faults. The system uses a per-process page table structure stored in `lista_tablas_de_procesos`.
+
+## Data Structures
+
+### entrada_pagina
+
+Represents a single page table entry for a process.
+
+```c
+typedef struct {
+    int num_marco;           // Physical frame number (-1 if not in memory)
+    int modificado;          // Modified bit (1 if page has been written to)
+    int en_memoria;          // Presence bit (1 if page is in physical memory)
+    int pid;                 // Process ID that owns this page
+    int num_pagina;          // Logical page number
+    time_t ultimo_tiempo_uso; // Last access time (for LRU algorithm)
+    int posicion_swap;       // Position in swap space
+} entrada_pagina;
+```
+
+**Fields:**
+- `num_marco`: Physical frame number where the page is loaded, or -1 if not in memory
+- `modificado`: Dirty bit indicating if the page has been modified (requires write-back to swap)
+- `en_memoria`: Presence bit indicating if the page is currently in physical memory
+- `pid`: Process ID that owns this page
+- `num_pagina`: Logical page number within the process's address space
+- `ultimo_tiempo_uso`: Timestamp of last access, used by the LRU replacement algorithm
+- `posicion_swap`: Block number in swap space where this page is stored
+
+## Process Initialization
+
+### inicializar_proceso
+
+Initializes a page table for a new process.
+
+```c
+t_list* inicializar_proceso(pcb* proceso, t_list* bloques_reservados)
+```
+
+**Parameters:**
+- `proceso`: Pointer to the process control block containing PID and size
+- `bloques_reservados`: List of swap block numbers reserved for this process
+
+**Returns:**
+- `t_list*`: Pointer to the newly created page table (list of `entrada_pagina` structures)
+
+**Description:**
+
+Creates a page table for a new process with all pages initially marked as not in memory. Each page table entry is initialized with:
+- `num_marco = -1` (not in physical memory)
+- `modificado = 0` (not modified)
+- `en_memoria = 0` (not present)
+- `pid` set to the process ID
+- `num_pagina` set to the page index
+- `ultimo_tiempo_uso = NULL` (no access yet)
+- `posicion_swap` set from the reserved swap blocks
+
+The function logs the process creation: `PID: <pid> - Tamaño: <num_pages>`
+
+**Example usage:**
+```c
+// From main.c:81-92
+pcb* proceso = recv_pcb(cliente_socket);
+log_info(logger_memoria, "Creación de Proceso PID: %d, path: %s", proceso->pid, proceso->path);
+int cant_paginas_necesarias = paginas_necesarias(proceso);
+send_reserva_swap(conexion_memoria_filesystem, cant_paginas_necesarias);
+t_list* bloques_reservados = recv_reserva_swap(conexion_memoria_filesystem);
+t_list* tabla_paginas = inicializar_proceso(proceso, bloques_reservados);
+list_add(lista_tablas_de_procesos, tabla_paginas);
+```
+
+**Source:** memoria/src/main.c:389-407
+
+### paginas_necesarias
+
+Calculates the number of pages required for a process.
+
+```c
+int paginas_necesarias(pcb *proceso)
+```
+
+**Parameters:**
+- `proceso`: Pointer to the process control block
+
+**Returns:**
+- `int`: Number of pages needed (proceso->size / tam_pagina)
+
+**Source:** memoria/src/main.c:423-425
+
+## Address Translation
+
+### obtener_nro_marco_memoria
+
+Translates a logical page number to a physical frame number.
+
+```c
+int obtener_nro_marco_memoria(int num_pagina, int pid_actual)
+```
+
+**Parameters:**
+- `num_pagina`: Logical page number to translate
+- `pid_actual`: Process ID requesting the translation
+
+**Returns:**
+- `int`: Physical frame number if page is in memory, -1 if page fault
+
+**Description:**
+
+Searches through `lista_tablas_de_procesos` to find the page table for the specified process, then looks up the page entry. If the page is in memory (`en_memoria == 1`), returns the frame number and logs the translation. Otherwise, returns -1 to indicate a page fault.
+
+**Log output:**
+```
+PID: <pid> - Pagina: <num_pagina> - Marco: <num_marco>
+```
+
+**Example usage:**
+```c
+// From main.c:103-118
+int pid;
+int numero_pagina;
+recv_pedido_marco(cliente_socket, &pid, &numero_pagina);
+int numeroMarco = obtener_nro_marco_memoria(numero_pagina, pid);
+if(numeroMarco >= 0){
+    send_marco(cliente_socket, numeroMarco);
+}else{
+    // Send page fault notification
+    t_paquete* paquetePageFault = crear_paquete(PCB_PAGEFAULT);
+    agregar_a_paquete(paquetePageFault, &numeroMarco, sizeof(int));
+    enviar_paquete(paquetePageFault, cliente_socket);
+    eliminar_paquete(paquetePageFault);
+}
+```
+
+**Source:** memoria/src/main.c:299-313
+
+### buscar_tabla_pagina
+
+Finds the page table for a specific process.
+
+```c
+t_list* buscar_tabla_pagina(int pid_actual)
+```
+
+**Parameters:**
+- `pid_actual`: Process ID to search for
+
+**Returns:**
+- `t_list*`: Pointer to the page table (list of `entrada_pagina`), or NULL if not found
+
+**Description:**
+
+Iterates through `lista_tablas_de_procesos` to find the page table belonging to the specified process. Identifies the correct table by checking the PID of the first entry.
+
+**Source:** memoria/src/main.c:477-486
+
+### buscar_en_tabla_por_direccionfisica
+
+Finds a page table entry by physical frame number.
+
+```c
+entrada_pagina* buscar_en_tabla_por_direccionfisica(int direccionfisica)
+```
+
+**Parameters:**
+- `direccionfisica`: Physical frame number to search for
+
+**Returns:**
+- `entrada_pagina*`: Pointer to the page entry, or NULL if not found
+
+**Description:**
+
+Searches all page tables to find the entry with the matching frame number and `en_memoria == 1`.
+
+**Source:** memoria/src/main.c:325-336
+
+## Page Fault Handling
+
+### tratar_page_fault
+
+Handles a page fault by loading a page from swap into physical memory.
+
+```c
+int tratar_page_fault(int num_pagina, int pid_actual)
+```
+
+**Parameters:**
+- `num_pagina`: Logical page number that caused the fault
+- `pid_actual`: Process ID that owns the page
+
+**Returns:**
+- `int`: Physical frame number where the page was loaded
+
+**Description:**
+
+Handles a page fault through the following steps:
+
+1. **Locate page entry**: Finds the page table and gets the faulting page entry
+2. **Log page fault**: Logs "PAGE FAULT" in lime color
+3. **Load from swap**: Requests the page content from filesystem using `send_pedido_swap()` and receives it with `recv_leido_swap()`
+4. **Find/allocate frame**:
+   - Calls `buscar_marco_libre()` to find an empty frame
+   - If no free frames exist (`nro_marco == -1`), calls `usar_algoritmo()` to select a victim page for replacement
+5. **Write page to memory**: Calls `escribir_bloque_en_memoria()` to copy the page content into the frame
+6. **Update page entry**:
+   - Sets `num_marco` to the allocated frame
+   - Sets `en_memoria = 1`
+   - Sets `ultimo_tiempo_uso = time(NULL)`
+7. **Update tracking**:
+   - Adds the page to `paginas_en_memoria` list
+   - Marks the frame as occupied in `bitarray_marcos_ocupados`
+
+**Example usage:**
+```c
+// From main.c:187-196
+int pid_pag;
+int pagina_a_cargar;
+recv_cargar_pagina(cliente_socket, &pid_pag, &pagina_a_cargar);
+int numero_marco = tratar_page_fault(pagina_a_cargar, pid_pag);
+send_pagina_cargada(cliente_socket);
+```
+
+**Source:** memoria/src/main.c:506-558
+
+## Memory Operations
+
+### leer_registro_de_memoria_uint
+
+Reads a 32-bit unsigned integer from a physical address.
+
+```c
+uint32_t* leer_registro_de_memoria_uint(DireccionFisica direccion)
+```
+
+**Parameters:**
+- `direccion`: Physical address containing frame number and offset
+
+**Returns:**
+- `uint32_t*`: Pointer to the read value (caller must free)
+
+**Description:**
+
+Reads a uint32_t value from physical memory at the specified frame and offset. Thread-safe using `mx_memoria` mutex.
+
+**Source:** memoria/src/main.c:347-355
+
+### escribir_marco_en_memoria
+
+Writes a 32-bit value to a physical address.
+
+```c
+void escribir_marco_en_memoria(DireccionFisica direccion, uint32_t* valor)
+```
+
+**Parameters:**
+- `direccion`: Physical address containing frame number and offset
+- `valor`: Pointer to the value to write
+
+**Description:**
+
+Writes a uint32_t value to physical memory at the specified frame and offset. Thread-safe using `mx_memoria` mutex.
+
+**Source:** memoria/src/main.c:339-345
+
+### leer_marco_de_memoria
+
+Reads an entire page frame from memory.
+
+```c
+void* leer_marco_de_memoria(int nro_marco)
+```
+
+**Parameters:**
+- `nro_marco`: Physical frame number to read
+
+**Returns:**
+- `void*`: Pointer to buffer containing the page data (caller must free)
+
+**Description:**
+
+Reads an entire page (size `tam_pagina`) from the specified frame. Used primarily for writing modified pages to swap. Thread-safe using `mx_memoria` mutex.
+
+**Source:** memoria/src/main.c:357-365
+
+### escribir_bloque_en_memoria
+
+Writes a page from swap into a physical frame.
+
+```c
+void escribir_bloque_en_memoria(char* bloque_swap, int nro_marco)
+```
+
+**Parameters:**
+- `bloque_swap`: Buffer containing the page data from swap
+- `nro_marco`: Physical frame number to write to
+
+**Description:**
+
+Copies a full page of data from the swap buffer into the specified physical frame. Thread-safe using `mx_memoria` mutex.
+
+**Source:** memoria/src/main.c:488-493
+
+### marcar_pagina_modificada
+
+Marks a page as modified (dirty).
+
+```c
+void marcar_pagina_modificada(int dirFisica)
+```
+
+**Parameters:**
+- `dirFisica`: Physical frame number of the page to mark
+
+**Description:**
+
+Sets the `modificado` bit to 1 for the page currently loaded in the specified frame. Called after write operations to indicate the page needs to be written back to swap if evicted.
+
+**Example usage:**
+```c
+// From main.c:239
+marcar_pagina_modificada(direccion.marco);
+```
+
+**Source:** memoria/src/main.c:315-323
+
+## Frame Management
+
+### buscar_marco_libre
+
+Finds the first available physical frame.
+
+```c
+int buscar_marco_libre()
+```
+
+**Returns:**
+- `int`: Frame number of first free frame, or -1 if all frames are occupied
+
+**Description:**
+
+Iterates through `bitarray_marcos_ocupados` to find the first frame marked as free (value 0). Thread-safe using `mx_bitarray_marcos_ocupados` mutex.
+
+**Source:** memoria/src/main.c:368-378
+
+### get_memory_and_page_size
+
+Calculates the total number of frames in physical memory.
+
+```c
+int get_memory_and_page_size()
+```
+
+**Returns:**
+- `int`: Total number of frames (tam_memoria / tam_pagina)
+
+**Source:** memoria/src/main.c:460-462
+
+## Process Termination
+
+### terminar_proceso
+
+Cleans up all resources for a terminated process.
+
+```c
+void terminar_proceso(int pid)
+```
+
+**Parameters:**
+- `pid`: Process ID to terminate
+
+**Description:**
+
+Performs cleanup when a process terminates:
+1. Calls `eliminar_espacio_memoria()` to free all physical frames used by the process
+2. Gets the page table and collects all swap block positions
+3. Calls `eliminar_tabla_paginas()` to destroy the page table
+4. Sends `send_liberacion_swap()` to filesystem to free swap space
+
+**Source:** memoria/src/main.c:409-421
+
+### eliminar_espacio_memoria
+
+Frees all physical frames used by a process.
+
+```c
+void eliminar_espacio_memoria(int pid)
+```
+
+**Parameters:**
+- `pid`: Process ID whose frames should be freed
+
+**Description:**
+
+Iterates through `paginas_en_memoria` and removes all entries belonging to the specified process, marking their frames as free in `bitarray_marcos_ocupados`.
+
+**Source:** memoria/src/main.c:427-439
+
+### eliminar_tabla_paginas
+
+Destroys a process's page table.
+
+```c
+void eliminar_tabla_paginas(int pid)
+```
+
+**Parameters:**
+- `pid`: Process ID whose page table should be destroyed
+
+**Description:**
+
+Finds and removes the page table for the specified process from `lista_tablas_de_procesos`, freeing all page entries.
+
+**Source:** memoria/src/main.c:441-458
+
+## Global Variables
+
+```c
+t_list* lista_tablas_de_procesos;  // List of all page tables
+t_list* paginas_en_memoria;         // List of pages currently in physical memory
+void* memoria;                      // Physical memory buffer
+uint8_t* bitarray_marcos_ocupados;  // Frame allocation bitmap
+int tam_memoria;                    // Total physical memory size
+int tam_pagina;                     // Page/frame size
+```
+
+## Thread Safety
+
+All memory operations use mutexes for thread safety:
+- `mx_memoria`: Protects physical memory reads/writes
+- `mx_bitarray_marcos_ocupados`: Protects frame allocation bitmap
+- `mx_paginas_en_memoria`: Protects the list of loaded pages

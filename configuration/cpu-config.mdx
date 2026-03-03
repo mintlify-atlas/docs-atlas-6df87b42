@@ -1,0 +1,71 @@
+---
+title: 'CPU Configuration'
+description: 'Configuration parameters for the CPU module'
+---
+
+The CPU module handles instruction execution and communicates with Memory through dispatch and interrupt ports.
+
+## Configuration File
+
+The CPU module reads its configuration from a `.config` file passed as a command-line argument:
+
+```bash
+./cpu cpu.config
+```
+
+## Configuration Parameters
+
+<ParamField path="IP_MEMORIA" type="string" required>
+  IP address of the Memory module to connect to.
+  
+  **Example:** `127.0.0.1`
+</ParamField>
+
+<ParamField path="PUERTO_MEMORIA" type="integer" required>
+  Port number where the Memory module is listening.
+  
+  **Example:** `8002`
+</ParamField>
+
+<ParamField path="PUERTO_ESCUCHA_DISPATCH" type="integer" required>
+  Port number where CPU will listen for dispatch connections from the Kernel.
+  
+  The dispatch port is used for sending PCBs (Process Control Blocks) to execute.
+  
+  **Example:** `8006`
+</ParamField>
+
+<ParamField path="PUERTO_ESCUCHA_INTERRUPT" type="integer" required>
+  Port number where CPU will listen for interrupt signals from the Kernel.
+  
+  The interrupt port is used for process interruptions (quantum expiration, priorities, finalization).
+  
+  **Example:** `8007`
+</ParamField>
+
+## Configuration Example
+
+```properties
+IP_MEMORIA=127.0.0.1
+PUERTO_MEMORIA=8002
+PUERTO_ESCUCHA_DISPATCH=8006
+PUERTO_ESCUCHA_INTERRUPT=8007
+```
+
+## Module Communication
+
+The CPU module establishes the following connections:
+
+- **Client connection** to Memory (IP_MEMORIA:PUERTO_MEMORIA)
+- **Server on PUERTO_ESCUCHA_DISPATCH** - receives execution contexts from Kernel
+- **Server on PUERTO_ESCUCHA_INTERRUPT** - receives interruption signals from Kernel
+
+## Notes
+
+<Note>
+  The CPU module implements the fetch-decode-execute cycle for the MAPPA instruction set. It handles interruptions, page faults, and communicates with Memory for instruction fetching and address translation.
+</Note>
+
+<Warning>
+  Ensure that PUERTO_ESCUCHA_DISPATCH and PUERTO_ESCUCHA_INTERRUPT are different and not already in use by other processes.
+</Warning>

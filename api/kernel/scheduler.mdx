@@ -1,0 +1,467 @@
+---
+title: Scheduler API
+description: Process scheduler functions and queue operations for MAPPA OS Kernel
+---
+
+The Scheduler API provides functions for long-term and short-term process scheduling, queue management, and interrupt control.
+
+## Planning Functions
+
+### planif_largo_plazo
+
+```c
+void* planif_largo_plazo(void* args)
+```
+
+Long-term scheduler that moves processes from NEW to READY state.
+
+**Thread Function**: Runs continuously in a separate thread.
+
+**Behavior**:
+- Waits for processes in NEW queue
+- Waits for available multiprogramming slot
+- Respects planning pause control
+- Moves process from NEW to READY
+
+**Synchronization**:
+- `sem_wait(&cantidad_new)` - Waits for processes in NEW
+- `sem_wait(&cantidad_multiprogramacion)` - Waits for multiprogramming slot
+- `mutex_plani_larga` - Protects planning state
+- `sem_plan_largo` - Controls planning pause/resume
+
+**Source**: kernel/src/main.c:370
+
+---
+
+### planif_corto_plazo
+
+```c
+void* planif_corto_plazo(void* args)
+```
+
+Short-term scheduler that selects processes from READY for execution.
+
+**Thread Function**: Runs continuously in a separate thread.
+
+**Behavior**:
+- Waits for free execution slot
+- Waits for processes in READY queue
+- Respects planning pause control
+- Selects next process based on algorithm (FIFO, RR, PRIORIDADES)
+- Sends process to CPU for execution
+- Triggers interrupt control for RR
+
+**Synchronization**:
+- `sem_wait(&puedo_ejecutar_proceso)` - Ensures single process in EXEC
+- `sem_wait(&cantidad_ready)` - Waits for ready processes
+- `mutex_plani_corta` - Protects planning state
+- `sem_plan_corto` - Controls planning pause/resume
+
+**Source**: kernel/src/main.c:386
+
+---
+
+## Process Selection Functions
+
+### obtenerSiguienteFIFO
+
+```c
+pcb* obtenerSiguienteFIFO()
+```
+
+Selects the next process for FIFO (First In First Out) scheduling.
+
+**Returns**: Pointer to the next PCB to execute.
+
+**Behavior**:
+- Removes and returns first process from READY queue
+- Uses FIFO order (queue semantics)
+
+**Thread-Safety**: Protected by `mutex_ready`
+
+**Source**: kernel/src/main.c:499
+
+---
+
+### obtenerSiguienteRR
+
+```c
+pcb* obtenerSiguienteRR()
+```
+
+Selects the next process for Round Robin scheduling.
+
+**Returns**: Pointer to the next PCB to execute.
+
+**Behavior**:
+- Removes and returns first process from READY queue
+- Uses FIFO order with quantum-based preemption
+- Works in conjunction with `controlar_interrupcion_rr`
+
+**Thread-Safety**: Protected by `mutex_ready`
+
+**Source**: kernel/src/main.c:508
+
+---
+
+### obtenerSiguientePRIORIDADES
+
+```c
+pcb* obtenerSiguientePRIORIDADES()
+```
+
+Selects the next process for priority-based scheduling.
+
+**Returns**: Pointer to the highest priority PCB to execute.
+
+**Behavior**:
+- Sorts READY queue by priority (lower value = higher priority)
+- Removes and returns highest priority process
+- Uses preemptive priority scheduling
+
+**Comparison Function**: Uses `cmp` function where `pa->prioridad < pb->prioridad`
+
+**Thread-Safety**: Protected by `mutex_ready`
+
+**Source**: kernel/src/main.c:525
+
+---
+
+## Interrupt Control Functions
+
+### controlar_interrupcion_rr
+
+```c
+void controlar_interrupcion_rr()
+```
+
+Controls quantum-based interrupts for Round Robin scheduling.
+
+**Thread Function**: Created only when algorithm is "RR".
+
+**Behavior**:
+1. Waits for process to start execution
+2. Sleeps for quantum duration (in milliseconds)
+3. Checks if CPU is still busy
+4. If process not finished and ready queue not empty:
+   - Sends interrupt to CPU
+   - Logs quantum expiration
+5. Handles exit and desalojado flags
+
+**Global Variables Used**:
+- `quantum` - Time slice in milliseconds
+- `cpu_disponible` - CPU availability flag
+- `hay_exit` - Process exited flag
+- `pcb_desalojado` - Process already preempted flag
+
+**Source**: kernel/src/main.c:446
+
+---
+
+### controlar_interrupcion_prioridades
+
+```c
+void controlar_interrupcion_prioridades()
+```
+
+Controls priority-based preemption for PRIORIDADES scheduling.
+
+**Thread Function**: Created only when algorithm is "PRIORIDADES".
+
+**Behavior**:
+1. Waits for new process in READY queue
+2. Compares priority of executing process with highest priority in READY
+3. If READY has higher priority process (lower value):
+   - Sends interrupt to CPU
+   - Logs preemption reason
+4. Handles exit flag to avoid unnecessary interrupts
+
+**Preemption Logic**:
+```c
+if (prioridadAComparar < proceso->prioridad)
+```
+
+**Source**: kernel/src/main.c:473
+
+---
+
+## Queue Operations
+
+### agregar_a_new
+
+```c
+void agregar_a_new(pcb* proceso)
+```
+
+Adds a process to the NEW queue.
+
+**Parameters**:
+- `proceso` - Pointer to PCB to add
+
+**Behavior**:
+- Changes process state to NEW
+- Adds to NEW queue
+- Logs process creation
+- Signals long-term scheduler
+
+**Thread-Safety**: Protected by `mutex_new`
+
+**Source**: kernel/src/main.c:290
+
+---
+
+### agregar_a_ready
+
+```c
+void agregar_a_ready(pcb* proceso)
+```
+
+Adds a process to the READY queue.
+
+**Parameters**:
+- `proceso` - Pointer to PCB to add
+
+**Behavior**:
+- Changes process state to READY
+- Adds to READY queue
+- Logs current READY queue state
+- Signals short-term scheduler
+- Signals priority interrupt controller
+
+**Logging**: Shows READY queue with algorithm type
+
+**Thread-Safety**: Protected by `mutex_ready`
+
+**Source**: kernel/src/main.c:308
+
+---
+
+### agregar_a_exec
+
+```c
+void agregar_a_exec(pcb* proceso)
+```
+
+Adds a process to the EXEC queue.
+
+**Parameters**:
+- `proceso` - Pointer to PCB to execute
+
+**Behavior**:
+- Resets `pcb_desalojado` flag
+- Changes process state to EXEC
+- Adds to EXEC queue
+- Signals execution started
+
+**Thread-Safety**: Protected by `mutex_exec`
+
+**Source**: kernel/src/main.c:322
+
+---
+
+### sacar_de_exec
+
+```c
+pcb* sacar_de_exec()
+```
+
+Removes and returns the process from EXEC queue.
+
+**Returns**: Pointer to the executing PCB.
+
+**Behavior**:
+- Sets `pcb_desalojado` flag
+- Waits for execution slot
+- Removes process from EXEC queue
+
+**Thread-Safety**: Protected by `mutex_exec`
+
+**Source**: kernel/src/main.c:331
+
+---
+
+### agregar_a_block
+
+```c
+void agregar_a_block(pcb* proceso)
+```
+
+Adds a process to the BLOCK queue.
+
+**Parameters**:
+- `proceso` - Pointer to PCB to block
+
+**Behavior**:
+- Changes process state to BLOCK
+- Adds to BLOCK queue
+- Signals blocked process count
+
+**Thread-Safety**: Protected by `mutex_block`
+
+**Source**: kernel/src/main.c:348
+
+---
+
+### sacar_de_block
+
+```c
+pcb* sacar_de_block()
+```
+
+Removes and returns the first process from BLOCK queue.
+
+**Returns**: Pointer to the blocked PCB.
+
+**Behavior**:
+- Waits for blocked processes
+- Removes first process from BLOCK queue
+
+**Thread-Safety**: Protected by `mutex_block`
+
+**Source**: kernel/src/main.c:356
+
+---
+
+### agregar_a_exit
+
+```c
+void agregar_a_exit(pcb* proceso)
+```
+
+Adds a process to the EXIT queue.
+
+**Parameters**:
+- `proceso` - Pointer to PCB to terminate
+
+**Behavior**:
+- Changes process state to EXIT_ESTADO
+- Adds to EXIT queue
+- Signals exit count
+
+**Thread-Safety**: Protected by `mutex_exit`
+
+**Source**: kernel/src/main.c:340
+
+---
+
+### sacar_de_new
+
+```c
+pcb* sacar_de_new()
+```
+
+Removes and returns the first process from NEW queue.
+
+**Returns**: Pointer to the new PCB.
+
+**Behavior**:
+- Removes first process from NEW queue
+- Does not wait on semaphore (handled by caller)
+
+**Thread-Safety**: Protected by `mutex_new`
+
+**Source**: kernel/src/main.c:299
+
+---
+
+## Helper Functions
+
+### obtener_siguiente_proceso
+
+```c
+pcb* obtener_siguiente_proceso(char* algoritmo_planificacion)
+```
+
+Dispatcher function that selects the appropriate scheduling algorithm.
+
+**Parameters**:
+- `algoritmo_planificacion` - Algorithm name ("FIFO", "RR", "PRIORIDADES")
+
+**Returns**: Pointer to next PCB to execute, or NULL if algorithm invalid.
+
+**Behavior**:
+- Delegates to appropriate algorithm function
+- FIFO → `obtenerSiguienteFIFO()`
+- RR → `obtenerSiguienteRR()`
+- PRIORIDADES → `obtenerSiguientePRIORIDADES()`
+
+**Source**: kernel/src/main.c:418
+
+---
+
+### crear_hilo_interrupcion
+
+```c
+void crear_hilo_interrupcion(char* algoritmo_planificacion, pthread_t hilo_interrupciones)
+```
+
+Creates the appropriate interrupt control thread based on algorithm.
+
+**Parameters**:
+- `algoritmo_planificacion` - Algorithm name
+- `hilo_interrupciones` - Thread handle (output)
+
+**Behavior**:
+- FIFO: No interrupt thread (non-preemptive)
+- RR: Creates `controlar_interrupcion_rr` thread
+- PRIORIDADES: Creates `controlar_interrupcion_prioridades` thread
+- Detaches thread for independent execution
+
+**Source**: kernel/src/main.c:430
+
+---
+
+### cambiar_estado
+
+```c
+void cambiar_estado(pcb* pcb, estado_proceso nuevo_estado)
+```
+
+Changes process state and logs the transition.
+
+**Parameters**:
+- `pcb` - Process control block
+- `nuevo_estado` - New state (NEW, READY, EXEC, BLOCK, EXIT_ESTADO)
+
+**Behavior**:
+- Only changes if state is different
+- Logs state transition with PID
+- Format: "PID: X - Estado Anterior: Y - Estado Actual: Z"
+
+**Source**: kernel/src/main.c:1451
+
+---
+
+## Related Types
+
+### estado_proceso
+
+Process state enumeration:
+- `NEW` - Process created, not yet in memory
+- `READY` - Process ready to execute
+- `EXEC` - Process currently executing
+- `BLOCK` - Process blocked waiting for resource
+- `EXIT_ESTADO` - Process terminated
+
+### Queue Semaphores
+
+- `cantidad_new` - Count of processes in NEW
+- `cantidad_ready` - Count of processes in READY
+- `cantidad_exec` - Count of processes in EXEC
+- `cantidad_block` - Count of processes in BLOCK
+- `cantidad_exit` - Count of processes in EXIT
+- `puedo_ejecutar_proceso` - Binary semaphore for single EXEC process
+- `cantidad_multiprogramacion` - Available multiprogramming slots
+
+### Queue Mutexes
+
+- `mutex_new` - Protects NEW queue
+- `mutex_ready` - Protects READY queue
+- `mutex_exec` - Protects EXEC queue
+- `mutex_block` - Protects BLOCK queue
+- `mutex_exit` - Protects EXIT queue
+
+## See Also
+
+- [Console Commands](/api/kernel/console-commands) - User commands for process control
+- [Resource Management](/api/kernel/resources) - Resource allocation and deadlock detection

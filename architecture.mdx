@@ -1,0 +1,387 @@
+---
+title: System Architecture
+description: Understand the MAPPA OS architecture, module interactions, and communication patterns
+---
+
+# System Architecture
+
+MAPPA OS Simulator is built as a distributed system with four independent modules that communicate via TCP sockets. This architecture mirrors real operating systems where different subsystems operate independently while coordinating through well-defined interfaces.
+
+## High-Level Overview
+
+The system consists of four modules, each running as a separate process:
+
+```
+        ┌─────────────────────────────────────────┐
+        │             Kernel Module               │
+        │  • Process Management                   │
+        │  • Scheduling (FIFO/RR/Priorities)     │
+        │  • Resource Management                  │
+        │  • Console Interface                    │
+        └───────┬──────────────┬──────────────┬───┘
+                │              │              │
+         Socket │       Socket │       Socket │
+                ▼              ▼              ▼
+        ┌───────────┐  ┌───────────┐  ┌───────────┐
+        │    CPU    │  │  Memory   │  │Filesystem │
+        │           │  │           │  │           │
+        │ Dispatch  │──│ Pages &   │──│ FAT &     │
+        │ Interrupt │  │ Swap      │  │ Blocks    │
+        └───────────┘  └───────────┘  └───────────┘
+```
+
+## Module Responsibilities
+
+### Kernel Module
+
+**Port**: Connects to all other modules (client mode)
+
+The kernel is the central coordinator of the system:
+
+- **Process Lifecycle**: Creates (NEW), schedules (READY → EXEC), blocks (BLOCK), and terminates (EXIT) processes
+- **Long-term Scheduler**: Controls multiprogramming degree, moves processes from NEW to READY
+- **Short-term Scheduler**: Selects next process to execute based on algorithm (FIFO/RR/Priorities)
+- **Resource Manager**: Handles WAIT/SIGNAL operations with deadlock detection
+- **File Coordinator**: Manages file open/close with read/write locks
+- **Console Interface**: Provides interactive commands for system control
+
+**Key Components**:
+- 5 process queues (NEW, READY, EXEC, BLOCK, EXIT)
+- 2 scheduler threads (long-term, short-term)
+- 3 receiver threads (CPU, Memory, Filesystem responses)
+- Console thread for user input
+- Resource and file management structures
+
+*Source: kernel/src/main.c:3-1290*
+
+### CPU Module
+
+**Ports**: 
+- Dispatch server on `PUERTO_ESCUCHA_DISPATCH` (receives PCBs from Kernel)
+- Interrupt server on `PUERTO_ESCUCHA_INTERRUPT` (receives interrupts from Kernel)
+- Client to Memory on `PUERTO_MEMORIA`
+
+The CPU executes process instructions:
+
+- **Fetch-Decode-Execute Cycle**: Retrieves instructions from Memory, decodes operands, executes operations
+- **Dual Server Architecture**:
+  - **Dispatch Server**: Receives PCBs and executes instruction cycles
+  - **Interrupt Server**: Receives interrupt signals for preemption
+- **Address Translation**: Converts logical addresses to physical using page tables
+- **Instruction Set**: Arithmetic, memory access, I/O, file operations
+- **Context Management**: Maintains CPU registers (AX, BX, CX, DX, EAX, EBX, ECX, EDX, PC, SI, DI)
+
+**Key Components**:
+- 2 server threads (dispatch, interrupt)
+- Memory connection for instruction fetch and data access
+- PCB with 8 general-purpose registers
+- Interrupt flags for preemption
+
+*Source: cpu/src/main.c:3-310*
+
+### Memory Module
+
+**Port**: Server on `PUERTO_ESCUCHA` (accepts CPU and Filesystem connections)
+
+The memory module manages virtual memory:
+
+- **Page Tables**: One per process, tracks page location (memory or swap)
+- **Frame Management**: Allocates and frees physical memory frames
+- **Page Fault Handling**: Loads pages from swap when not in memory
+- **Page Replacement**: FIFO or LRU algorithm when memory is full
+- **Instruction Storage**: Stores process instruction files
+- **TLB Simulation**: Fast address translation (simulated through direct page table access)
+- **Swap Integration**: Coordinates with Filesystem for page storage
+
+**Key Components**:
+- Global page table list (one table per process)
+- Frame bitmap for allocation
+- Pages-in-memory list for replacement algorithms
+- Swap coordination with Filesystem
+
+*Source: memoria/src/main.c:2-825*
+
+### Filesystem Module
+
+**Port**: Server on `PUERTO_ESCUCHA` (accepts Memory and Kernel connections)
+
+The filesystem provides persistent storage:
+
+- **FAT (File Allocation Table)**: Linked list structure for block chains
+- **FCB (File Control Block)**: Metadata for each file (name, size, initial block)
+- **Block Management**: Allocates/frees blocks with bitmap tracking
+- **Swap Space**: Reserved blocks for Memory's virtual memory system
+- **File Operations**: Create, open, truncate, read, write
+- **Delays**: Configurable access delays for FAT and block I/O
+
+**Key Components**:
+- FAT file: Array of uint32_t entries
+- Blocks file: Binary file with fixed-size blocks
+- FCB directory: Configuration files per file
+- Swap and data block bitmaps
+
+*Source: filesystem/src/main.c:4-600*
+
+## Module Startup Order
+
+The modules must be started in a specific order to establish connections:
+
+<Steps>
+  <Step title="Start Filesystem">
+    ```bash
+    cd filesystem
+    make start ARGS="config/base.config"
+    ```
+    The filesystem starts its server and waits for connections. It initializes FAT, blocks, and bitmaps.
+  </Step>
+  
+  <Step title="Start Memory">
+    ```bash
+    cd memoria
+    make start ARGS="config/base.config"
+    ```
+    Memory connects to Filesystem as a client, then starts its server. It initializes page table lists and frame management.
+  </Step>
+  
+  <Step title="Start CPU">
+    ```bash
+    cd cpu
+    make start ARGS="config/cpu.config"
+    ```
+    CPU connects to Memory, then starts its Dispatch and Interrupt servers. It requests the page size from Memory.
+  </Step>
+  
+  <Step title="Start Kernel">
+    ```bash
+    cd kernel
+    make start ARGS="config/base.config"
+    ```
+    Kernel connects to CPU (both ports), Memory, and Filesystem. It starts all scheduler threads and the console interface.
+  </Step>
+</Steps>
+
+<Note>
+**From README.md**: The startup order is critical because each module depends on the previous ones being available.
+</Note>
+
+## Communication Patterns
+
+### Socket-Based IPC
+
+All inter-module communication uses TCP sockets with a custom protocol:
+
+```c
+// From utils/src/protocolo/protocolo.h
+typedef enum {
+    MENSAJE,
+    PAQUETE,
+    ENVIO_PCB,
+    PCB_EXIT,
+    PCB_WAIT,
+    PCB_SIGNAL,
+    // ... 80+ operation codes
+} op_code;
+
+typedef struct {
+    int size;
+    void* stream;
+} t_buffer;
+
+typedef struct {
+    op_code codigo_operacion;
+    t_buffer* buffer;
+} t_paquete;
+```
+
+**Communication Flow**:
+
+1. **Send Operation**: Module serializes data into a packet with an operation code
+2. **Receive Operation**: Receiving module reads the opcode first
+3. **Dispatch**: Based on opcode, appropriate handler deserializes and processes data
+4. **Response**: If needed, sends response packet with result opcode
+
+*Source: utils/src/protocolo/protocolo.c:1-600*
+
+### Request-Response Patterns
+
+<Tabs>
+  <Tab title="CPU ↔ Memory">
+    **Instruction Fetch**:
+    - CPU sends `ENVIO_INSTRUCCION` with path and PC
+    - Memory reads instruction file and responds with instruction
+    
+    **Address Translation**:
+    - CPU sends `PEDIDO_MARCO` with PID and page number
+    - Memory responds with `ENVIO_MARCO` (frame number) or `PCB_PAGEFAULT`
+    
+    **Memory Access**:
+    - CPU sends `MOV_IN` or `MOV_OUT` with physical address
+    - Memory reads/writes and responds with data or confirmation
+  </Tab>
+  
+  <Tab title="Kernel ↔ CPU">
+    **Process Execution**:
+    - Kernel sends `ENVIO_PCB` to Dispatch server
+    - CPU executes instructions until EXIT, BLOCK, or INTERRUPT
+    - CPU responds with `PCB_EXIT`, `PCB_WAIT`, `PCB_SIGNAL`, etc.
+    
+    **Interruption**:
+    - Kernel sends `INTERRUPCION` to Interrupt server
+    - CPU checks flag after each instruction
+    - If interrupted, returns `PCB_INTERRUPCION`
+  </Tab>
+  
+  <Tab title="Memory ↔ Filesystem">
+    **Process Initialization**:
+    - Memory sends `ENVIO_RESERVA_SWAP` with page count
+    - Filesystem reserves swap blocks and responds with block list
+    
+    **Page Fault**:
+    - Memory sends `LEER_SWAP` with block number
+    - Filesystem reads block and responds with data
+    
+    **Page Eviction**:
+    - Memory sends `ESCRIBIR_SWAP` if page is dirty
+    - Filesystem writes block and confirms
+  </Tab>
+  
+  <Tab title="Kernel ↔ Filesystem">
+    **File Operations**:
+    - Kernel sends `ABRIR_ARCHIVO`, `CREAR_ARCHIVO`, `TRUNCAR_ARCHIVO`
+    - Filesystem manipulates FCB, FAT, and blocks
+    - Responds with success/failure
+    
+    **I/O Operations**:
+    - Kernel sends `LEER_ARCHIVO` or `ESCRIBIR_ARCHIVO`
+    - Filesystem coordinates with Memory for data transfer
+    - Confirms completion
+  </Tab>
+</Tabs>
+
+## Thread Architecture
+
+Each module uses multiple threads for concurrency:
+
+### Kernel Threads
+
+```c
+// From kernel/src/main.c:128-147
+pthread_create(&hilo_consola, NULL, leer_consola, NULL);
+pthread_create(&hilo_plan_largo, NULL, planif_largo_plazo, NULL);
+pthread_create(&hilo_plan_corto, NULL, planif_corto_plazo, NULL);
+pthread_create(&hilo_respuestas_cpu, NULL, manejar_recibir_cpu, NULL);
+pthread_create(&hilo_respuestas_fs, NULL, manejar_recibir_fs, NULL);
+pthread_create(&hilo_respuestas_memoria, NULL, manejar_recibir_memoria, NULL);
+// Plus interrupt control threads (RR or Priorities)
+```
+
+- **Console**: Reads user commands (blocking readline)
+- **Long-term Planner**: Moves processes NEW → READY
+- **Short-term Planner**: Selects and dispatches READY → EXEC
+- **Interrupt Controller**: Manages quantum (RR) or priority preemption
+- **Receivers**: Handle responses from other modules
+
+### CPU Threads
+
+```c
+// From cpu/src/main.c:128-134
+pthread_create(&hilo_dispatch, NULL, procesar_conexion_dispatch, &socket_cliente_dispatch);
+pthread_create(&hilo_interrupt, NULL, procesar_conexion_interrupt, &socket_cliente_interrupt);
+```
+
+- **Dispatch Handler**: Receives PCBs, executes instruction cycles
+- **Interrupt Handler**: Receives interrupt signals, sets flags
+
+### Memory Threads
+
+```c
+// From memoria/src/main.c:264-272
+pthread_create(&hilo, NULL, procesar_conexion, &cliente_socket);
+```
+
+- **Connection Handlers**: One thread per client connection (CPU, Filesystem)
+- Each thread handles requests and sends responses
+
+### Filesystem Threads
+
+```c
+// Similar to Memory - one thread per connection
+pthread_create(&hilo, NULL, procesar_conexion, &cliente_socket);
+```
+
+- **Connection Handlers**: One thread per client (Memory, Kernel)
+
+## Synchronization
+
+The system uses various synchronization primitives:
+
+<AccordionGroup>
+  <Accordion title="Semaphores">
+    Control access to shared resources and coordinate scheduling:
+    - `cantidad_new`, `cantidad_ready`, `cantidad_exec`, `cantidad_block`, `cantidad_exit`: Process counts
+    - `cantidad_multiprogramacion`: Controls degree of multiprogramming
+    - `puedo_ejecutar_proceso`: Ensures only one process in EXEC
+    - `sem_plan_largo`, `sem_plan_corto`: Pause/resume schedulers
+    - Resource instance semaphores for WAIT/SIGNAL
+  </Accordion>
+  
+  <Accordion title="Mutexes">
+    Protect shared data structures:
+    - `mutex_new`, `mutex_ready`, `mutex_exec`, `mutex_block`, `mutex_exit`: Queue access
+    - `mx_memoria`: Protects memory reads/writes
+    - `mx_bitarray_marcos_ocupados`: Frame allocation
+    - `mx_paginas_en_memoria`: Page list for replacement algorithms
+    - Resource mutexes for atomic instance updates
+  </Accordion>
+  
+  <Accordion title="Flags">
+    Signal events between threads:
+    - `recibio_interrupcion`: CPU interrupt flag
+    - `recibio_interrupcion_finalizar`: Process termination flag
+    - `flag_ciclo`: Continues/stops instruction execution
+    - `ya_desalojo`: Prevents duplicate PCB returns
+    - `pcb_desalojado`: Tracks if PCB was already removed from EXEC
+  </Accordion>
+</AccordionGroup>
+
+## Configuration
+
+Each module has its own configuration file:
+
+<CardGroup cols={2}>
+  <Card title="CPU Configuration" href="/configuration/cpu-config">
+    Memory connection, dispatch and interrupt ports
+  </Card>
+  
+  <Card title="Memory Configuration" href="/configuration/memory-config">
+    Size, page size, replacement algorithm, Filesystem connection
+  </Card>
+  
+  <Card title="Kernel Configuration" href="/configuration/kernel-config">
+    All module connections, scheduling algorithm, resources
+  </Card>
+  
+  <Card title="Filesystem Configuration" href="/configuration/filesystem-config">
+    FAT/block paths, sizes, delays
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Setup Guide" icon="rocket" href="/setup">
+    Install and configure MAPPA OS
+  </Card>
+  
+  <Card title="Core Components" icon="microchip" href="/components/cpu">
+    Deep dive into each module
+  </Card>
+  
+  <Card title="IPC Protocol" icon="network-wired" href="/design/inter-process-communication">
+    Learn the communication protocol
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/cpu/instructions">
+    Complete API documentation
+  </Card>
+</CardGroup>

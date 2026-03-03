@@ -1,0 +1,163 @@
+---
+title: Introduction
+description: An operating system simulator implementing CPU, memory management, kernel scheduling, and filesystem with paging and resource management
+---
+
+# Welcome to MAPPA OS Simulator
+
+MAPPA OS Simulator is a comprehensive operating system implementation that simulates the core components of a modern OS. Built in C, it provides hands-on experience with operating system concepts including process scheduling, memory management, file systems, and inter-process communication.
+
+## What is MAPPA OS Simulator?
+
+MAPPA OS Simulator is an educational operating system that implements:
+
+- **CPU Module**: Executes processes using a fetch-decode-execute cycle with support for arithmetic, memory access, I/O, and file operations
+- **Memory Module**: Manages virtual memory with paging, TLB, and page replacement algorithms (FIFO and LRU)
+- **Kernel Module**: Coordinates process scheduling with multiple algorithms (FIFO, Round Robin, Priorities) and manages system resources
+- **Filesystem Module**: Provides a FAT-based file system with block allocation and swap space for virtual memory
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="CPU Instruction Execution" icon="microchip" href="/api/cpu/instructions">
+    Full instruction set with arithmetic, memory access, control flow, and file operations
+  </Card>
+  
+  <Card title="Memory Management" icon="memory" href="/design/memory-management">
+    Paging with FIFO and LRU page replacement algorithms and page fault handling
+  </Card>
+  
+  <Card title="Process Scheduling" icon="calendar" href="/design/process-scheduling">
+    Multiple scheduling algorithms: FIFO, Round Robin with quantum, and Priority-based preemption
+  </Card>
+  
+  <Card title="File System" icon="folder" href="/components/filesystem">
+    FAT-based filesystem with block management and swap space integration
+  </Card>
+  
+  <Card title="Resource Management" icon="lock" href="/api/kernel/resources">
+    Semaphore-based resource management with deadlock detection
+  </Card>
+  
+  <Card title="Inter-Process Communication" icon="network-wired" href="/design/inter-process-communication">
+    Socket-based communication with custom protocol for module coordination
+  </Card>
+</CardGroup>
+
+## System Architecture
+
+MAPPA OS consists of four independent modules that communicate via TCP sockets:
+
+```
+┌─────────────┐     ┌─────────────┐
+│   Kernel    │────▶│     CPU     │
+│             │◀────│ (Dispatch + │
+│             │     │  Interrupt) │
+└──────┬──────┘     └──────┬──────┘
+       │                   │
+       │                   │
+       ▼                   ▼
+┌─────────────┐     ┌─────────────┐
+│  Filesystem │────▶│   Memory    │
+│             │◀────│             │
+└─────────────┘     └─────────────┘
+```
+
+- **Kernel**: Central coordinator managing process lifecycle, scheduling, resources, and file operations
+- **CPU**: Executes process instructions with dual servers (dispatch for execution, interrupt for preemption)
+- **Memory**: Manages page tables, handles page faults, stores instructions, and provides paging support
+- **Filesystem**: Maintains FAT, manages blocks, and provides swap space for virtual memory
+
+## Instruction Set
+
+The CPU supports a rich instruction set:
+
+- **Arithmetic**: `SET`, `SUM`, `SUB`
+- **Memory Access**: `MOV_IN`, `MOV_OUT`
+- **Control Flow**: `JNZ`, `EXIT`
+- **Synchronization**: `WAIT`, `SIGNAL`, `SLEEP`
+- **File Operations**: `F_OPEN`, `F_CLOSE`, `F_SEEK`, `F_READ`, `F_WRITE`, `F_TRUNCATE`
+
+See the [CPU Instructions](/api/cpu/instructions) reference for complete details.
+
+## Scheduling Algorithms
+
+The kernel supports three process scheduling algorithms:
+
+<Accordion title="FIFO (First In, First Out)">
+Non-preemptive scheduling where processes execute in arrival order until completion or blocking.
+</Accordion>
+
+<Accordion title="Round Robin">
+Preemptive scheduling with configurable quantum. Each process executes for a time slice before being preempted.
+</Accordion>
+
+<Accordion title="Priorities">
+Preemptive priority-based scheduling where lower priority numbers execute first. Higher priority processes can preempt lower priority ones.
+</Accordion>
+
+## Page Replacement Algorithms
+
+The memory module implements two page replacement algorithms:
+
+<Tabs>
+  <Tab title="FIFO">
+    **First In, First Out** - Replaces the oldest page in memory. Simple but may not be optimal for all workloads.
+  </Tab>
+  <Tab title="LRU">
+    **Least Recently Used** - Replaces the page that hasn't been accessed for the longest time. Better performance for temporal locality.
+  </Tab>
+</Tabs>
+
+## Getting Started
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture">
+    Learn about the system architecture and how components interact
+  </Card>
+  
+  <Card title="Setup Guide" icon="rocket" href="/setup">
+    Install dependencies and configure your first MAPPA OS instance
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/configuration/kernel-config">
+    Configure modules for different scenarios and workloads
+  </Card>
+  
+  <Card title="Build System" icon="hammer" href="/development/building">
+    Learn about the Makefile-based build system
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+MAPPA OS Simulator is designed for:
+
+- **Operating Systems Education**: Hands-on learning of OS concepts
+- **Algorithm Comparison**: Test different scheduling and page replacement strategies
+- **System Testing**: Validate OS designs with configurable parameters
+- **Performance Analysis**: Measure impact of various configuration options
+
+## Next Steps
+
+<Steps>
+  <Step title="Understand the Architecture">
+    Read the [Architecture](/architecture) page to understand how modules communicate
+  </Step>
+  
+  <Step title="Set Up Your Environment">
+    Follow the [Setup Guide](/setup) to install and configure MAPPA OS
+  </Step>
+  
+  <Step title="Explore Components">
+    Learn about each [Core Component](/components/cpu) in detail
+  </Step>
+  
+  <Step title="Configure for Your Needs">
+    Customize [Configuration](/configuration/kernel-config) parameters
+  </Step>
+</Steps>
+
+<Note>
+MAPPA OS requires the [SO commons library](https://github.com/sisoputnfrba/so-commons-library) for logging, configuration, and data structures.
+</Note>

@@ -1,0 +1,429 @@
+---
+title: Testing Guide
+description: Running and writing tests for MAPPA OS Simulator
+---
+
+## Test Structure
+
+Tests are organized in `tests/` directories within each module:
+
+```
+<module>/
+├── src/
+│   └── main.c
+├── tests/
+│   ├── test_scheduling.c
+│   ├── test_memory.c
+│   └── test_utils.c
+└── makefile
+```
+
+### Test Framework
+
+The project uses **cspecs** for testing, a BDD-style testing framework for C.
+
+<Note>
+  Tests are only compiled if a `tests/` directory exists with test files.
+</Note>
+
+## Building Tests
+
+Tests are automatically built with the `all` target:
+
+```bash
+make all
+```
+
+This creates a test binary: `bin/<module>_tests.out`
+
+### Test Compilation
+
+Tests are compiled with debug flags and linked against cspecs:
+
+```makefile
+TEST = bin/$(shell cd . && pwd | xargs basename)_tests.out
+
+$(TEST): CFLAGS = $(CDEBUG)
+$(TEST): $(TEST_OBJS)
+    gcc $(CFLAGS) -o "$@" $^ $(IDIRS:%=-I%) $(LIBDIRS:%=-L%) \
+        $(RUNDIRS:%=-Wl,-rpath,%) $(LIBS:%=-l%) -lcspecs
+```
+
+### Test Object Files
+
+The makefile excludes `main.c` from test compilation to avoid conflicts:
+
+```makefile
+TEST_EXCLUDE=src/main.c
+TEST_OBJS = $(filter-out $(TEST_EXCLUDE), $(TESTS_C)) \
+            $(patsubst src/%.c,obj/%.o,$(filter-out $(TEST_EXCLUDE), $(SRCS_C)))
+```
+
+## Running Tests
+
+### Basic Test Execution
+
+<CodeGroup>
+```bash Run Tests
+make test
+```
+
+```bash Run Tests (Manual)
+./bin/<module>_tests.out
+```
+</CodeGroup>
+
+The `make test` target runs tests through valgrind for basic execution:
+
+```makefile
+test: $(TEST)
+    valgrind --tool=none ./$(TEST)
+```
+
+<Info>
+  Using `--tool=none` ensures valgrind doesn't perform any analysis, just clean execution.
+</Info>
+
+### Watch Mode for Tests
+
+Automatically run tests when source or test files change:
+
+```bash
+make test-daemon
+```
+
+This monitors both `tests/` and `src/` directories and reruns tests on any change.
+
+## Memory Leak Checking
+
+### Running Memcheck
+
+Check for memory leaks and memory errors:
+
+<CodeGroup>
+```bash Test with Memcheck
+make test-memcheck
+```
+
+```bash Manual Memcheck
+valgrind --leak-check=full --track-origins=yes ./bin/<module>_tests.out
+```
+</CodeGroup>
+
+### Memcheck Flags
+
+Configured in `settings.mk`:
+
+```makefile
+MEMCHECK_FLAGS=--track-origins=yes
+```
+
+**Valgrind command:**
+```bash
+valgrind --leak-check=full --track-origins=yes ./bin/<module>_tests.out
+```
+
+### Interpreting Memcheck Output
+
+**No leaks:**
+```
+HEAP SUMMARY:
+    in use at exit: 0 bytes in 0 blocks
+  total heap usage: 42 allocs, 42 frees, 1,024 bytes allocated
+
+All heap blocks were freed -- no leaks are possible
+```
+
+**Memory leak detected:**
+```
+20 bytes in 1 blocks are definitely lost in loss record 1 of 1
+   at 0x4C2FB0F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+   by 0x108A2E: allocate_buffer (memory.c:45)
+   by 0x108B1A: initialize_system (main.c:23)
+```
+
+**Invalid memory access:**
+```
+Invalid write of size 4
+   at 0x108C3D: write_to_buffer (memory.c:67)
+ Address 0x5204050 is 0 bytes after a block of size 16 alloc'd
+   at 0x4C2FB0F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+```
+
+### Common Memory Issues
+
+<AccordionGroup>
+  <Accordion title="Memory Leaks">
+    **Cause:** Allocated memory not freed
+    
+    ```c
+    // Bad
+    void* buffer = malloc(100);
+    // Missing free(buffer)
+    
+    // Good
+    void* buffer = malloc(100);
+    free(buffer);
+    ```
+  </Accordion>
+  
+  <Accordion title="Use After Free">
+    **Cause:** Accessing freed memory
+    
+    ```c
+    // Bad
+    free(buffer);
+    buffer[0] = 'x'; // Error!
+    
+    // Good
+    free(buffer);
+    buffer = NULL;
+    ```
+  </Accordion>
+  
+  <Accordion title="Invalid Write">
+    **Cause:** Writing beyond allocated bounds
+    
+    ```c
+    // Bad
+    char* str = malloc(10);
+    strcpy(str, "This is too long"); // Overflow!
+    
+    // Good
+    char* str = malloc(20);
+    strncpy(str, "This fits", 19);
+    str[19] = '\0';
+    ```
+  </Accordion>
+  
+  <Accordion title="Uninitialized Values">
+    **Cause:** Using variables before initialization
+    
+    ```c
+    // Bad
+    int* values = malloc(10 * sizeof(int));
+    printf("%d\n", values[0]); // Uninitialized!
+    
+    // Good
+    int* values = calloc(10, sizeof(int)); // Zero-initialized
+    // Or
+    int* values = malloc(10 * sizeof(int));
+    memset(values, 0, 10 * sizeof(int));
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Thread Safety Testing
+
+### Running Helgrind
+
+Detect race conditions and thread synchronization issues:
+
+<CodeGroup>
+```bash Test with Helgrind
+make test-helgrind
+```
+
+```bash Manual Helgrind
+valgrind --tool=helgrind ./bin/<module>_tests.out
+```
+</CodeGroup>
+
+### Helgrind Flags
+
+Configured in `settings.mk`:
+
+```makefile
+HELGRIND_FLAGS=
+```
+
+Additional flags can be added as needed:
+
+```makefile
+HELGRIND_FLAGS=--history-level=approx --conflict-cache-size=1000000
+```
+
+### Interpreting Helgrind Output
+
+**Data race detected:**
+```
+Possible data race during write of size 4 at 0x309030 by thread #2
+Locks held: none
+   at 0x108D5E: update_counter (thread.c:45)
+   by 0x4E4E6DA: start_thread (pthread_create.c:463)
+
+This conflicts with a previous write of size 4 by thread #1
+Locks held: none
+   at 0x108D5E: update_counter (thread.c:45)
+   by 0x4E4E6DA: start_thread (pthread_create.c:463)
+```
+
+**Lock order violation:**
+```
+Thread #1: lock order "0x309040 before 0x309060" violated
+
+Required order was established by acquisition of lock at 0x309040
+   at 0x4C32D3E: pthread_mutex_lock (in /usr/lib/valgrind/vgpreload_helgrind-amd64-linux.so)
+   by 0x108E2A: process_request (sync.c:67)
+```
+
+### Common Thread Issues
+
+<AccordionGroup>
+  <Accordion title="Data Races">
+    **Cause:** Multiple threads accessing shared data without synchronization
+    
+    ```c
+    // Bad
+    int counter = 0;
+    void* increment(void* arg) {
+        counter++; // Race condition!
+        return NULL;
+    }
+    
+    // Good
+    int counter = 0;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    
+    void* increment(void* arg) {
+        pthread_mutex_lock(&mutex);
+        counter++;
+        pthread_mutex_unlock(&mutex);
+        return NULL;
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Deadlocks">
+    **Cause:** Circular lock dependencies
+    
+    ```c
+    // Bad - can deadlock
+    // Thread 1: lock(A) -> lock(B)
+    // Thread 2: lock(B) -> lock(A)
+    
+    // Good - consistent lock order
+    // Thread 1: lock(A) -> lock(B)
+    // Thread 2: lock(A) -> lock(B)
+    ```
+  </Accordion>
+  
+  <Accordion title="Missing Synchronization">
+    **Cause:** Not protecting shared state
+    
+    ```c
+    // Bad
+    t_list* shared_list;
+    void add_item(void* item) {
+        list_add(shared_list, item); // Not thread-safe!
+    }
+    
+    // Good
+    t_list* shared_list;
+    pthread_mutex_t list_mutex;
+    
+    void add_item(void* item) {
+        pthread_mutex_lock(&list_mutex);
+        list_add(shared_list, item);
+        pthread_mutex_unlock(&list_mutex);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Writing Tests
+
+### Test File Structure
+
+Example test file using cspecs:
+
+```c tests/test_scheduler.c
+#include <cspecs/cspec.h>
+#include "scheduler.h"
+
+context(scheduler_tests) {
+    
+    describe("FIFO Scheduler") {
+        it("should execute processes in order") {
+            t_scheduler* sched = scheduler_create(FIFO);
+            
+            scheduler_add(sched, create_process(1));
+            scheduler_add(sched, create_process(2));
+            scheduler_add(sched, create_process(3));
+            
+            should_int(scheduler_next(sched)->pid) be equal to(1);
+            should_int(scheduler_next(sched)->pid) be equal to(2);
+            should_int(scheduler_next(sched)->pid) be equal to(3);
+            
+            scheduler_destroy(sched);
+        } end
+    } end
+    
+    describe("RR Scheduler") {
+        it("should respect quantum") {
+            t_scheduler* sched = scheduler_create(RR);
+            scheduler_set_quantum(sched, 100);
+            
+            should_int(scheduler_get_quantum(sched)) be equal to(100);
+            
+            scheduler_destroy(sched);
+        } end
+    } end
+    
+} end
+```
+
+### Running Specific Test Suites
+
+With cspecs, you can filter tests:
+
+```bash
+# Run all tests
+./bin/<module>_tests.out
+
+# Run specific context (if supported)
+./bin/<module>_tests.out --context=scheduler_tests
+```
+
+## Test Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Always Clean Up" icon="broom">
+    Free all allocated resources in tests to avoid false positives in memcheck.
+  </Card>
+  <Card title="Test Edge Cases" icon="triangle-exclamation">
+    Test NULL pointers, empty lists, boundary conditions, and error paths.
+  </Card>
+  <Card title="Use Meaningful Names" icon="tag">
+    Test names should clearly describe what they're testing.
+  </Card>
+  <Card title="Keep Tests Isolated" icon="lock">
+    Each test should be independent and not rely on other tests' state.
+  </Card>
+</CardGroup>
+
+## Continuous Testing Workflow
+
+Recommended workflow during development:
+
+```bash
+# Terminal 1: Watch and rebuild tests
+make test-daemon
+
+# Terminal 2: Run memcheck when needed
+make test-memcheck
+
+# Terminal 3: Run helgrind for threading tests
+make test-helgrind
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Debugging" icon="bug" href="/development/debugging">
+    Learn advanced debugging techniques
+  </Card>
+  <Card title="Building" icon="hammer" href="/development/building">
+    Understand the build system
+  </Card>
+</CardGroup>

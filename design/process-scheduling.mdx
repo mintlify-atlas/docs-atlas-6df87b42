@@ -1,0 +1,504 @@
+---
+title: 'Process Scheduling Design'
+description: 'Scheduling algorithms (FIFO, Round Robin, Priorities), quantum management, and context switching'
+---
+
+## Overview
+
+The MAPPA OS kernel implements **three scheduling algorithms**: FIFO (First-In-First-Out), Round Robin with preemptive quantum, and Priority-based scheduling with preemption. The scheduler manages process transitions between states (NEW, READY, EXEC, BLOCK, EXIT) using queues and semaphores.
+
+## Process States
+
+### State Definition
+
+```c:utils/src/protocolo/protocolo.h
+typedef enum {
+    NEW,           // Process created, not yet in memory
+    READY,         // Ready to execute
+    EXEC,          // Currently executing on CPU
+    BLOCK,         // Blocked waiting for I/O or resource
+    EXIT_ESTADO,   // Terminated
+} estado_proceso;
+```
+
+### State Queues
+
+```c:kernel/src/main.h
+t_queue* cola_new;     // Processes being initialized
+t_queue* cola_ready;   // Processes ready to execute
+t_queue* cola_exec;    // Currently executing process
+t_queue* cola_block;   // Blocked processes
+t_queue* cola_exit;    // Terminated processes
+```
+
+## Process Control Block (PCB)
+
+### PCB Structure
+
+```c:utils/src/protocolo/protocolo.h
+typedef struct {
+    int pid;                      // Process ID
+    int pc;                       // Program counter
+    int size;                     // Memory size required
+    int prioridad;                // Priority (lower = higher priority)
+    int tiempo_ejecucion;         // Execution time counter
+    char *path;                   // Path to instruction file
+    estado_proceso estado;        // Current state
+    t_registros *registros;       // CPU registers (AX, BX, CX, DX)
+    t_list *archivos;             // Open files
+} pcb;
+```
+
+### PCB Creation
+
+```c:kernel/src/main.c
+pcb* crear_pcb(char* nombre_archivo, char* size, char* prioridad) {
+    pcb* nuevo_pcb = malloc(sizeof(pcb));
+    nuevo_pcb->pid = contador_pid++;
+    nuevo_pcb->pc = 0;
+    nuevo_pcb->size = atoi(size);
+    nuevo_pcb->prioridad = atoi(prioridad);
+    nuevo_pcb->tiempo_ejecucion = 0;
+    nuevo_pcb->path = malloc(strlen(nombre_archivo) + 1);
+    strcpy(nuevo_pcb->path, nombre_archivo);
+    nuevo_pcb->estado = NEW;
+    nuevo_pcb->archivos = list_create();
+    
+    // Initialize registers
+    nuevo_pcb->registros = malloc(sizeof(t_registros));
+    nuevo_pcb->registros->ax = calloc(1, sizeof(uint32_t));
+    nuevo_pcb->registros->bx = calloc(1, sizeof(uint32_t));
+    nuevo_pcb->registros->cx = calloc(1, sizeof(uint32_t));
+    nuevo_pcb->registros->dx = calloc(1, sizeof(uint32_t));
+    
+    return nuevo_pcb;
+}
+```
+
+## Scheduling Configuration
+
+### Configuration Parameters
+
+```c:kernel/src/main.c
+char* algoritmo_planificacion;  // "FIFO", "RR", or "PRIORIDADES"
+int quantum;                     // Time slice for Round Robin (milliseconds)
+int grado_multiprogramacion;     // Degree of multiprogramming
+```
+
+## Long-Term Scheduler
+
+Controls admission of processes to the system based on multiprogramming degree:
+
+```c:kernel/src/main.c
+void* planif_largo_plazo(void* args) {
+    while(1) {
+        sem_wait(&cantidad_new);                  // Wait for process in NEW
+        sem_wait(&cantidad_multiprogramacion);     // Wait for available slot
+        pthread_mutex_lock(&mutex_plani_larga);
+        sem_wait(&sem_plan_largo);                // Pause if scheduling stopped
+        
+        // Move process from NEW to READY
+        pcb* proceso = sacar_de_new();
+        agregar_a_ready(proceso);
+        
+        sem_post(&sem_plan_largo);
+        pthread_mutex_unlock(&mutex_plani_larga);
+    }
+}
+```
+
+## Short-Term Scheduler
+
+Selects which ready process executes next:
+
+```c:kernel/src/main.c
+void* planif_corto_plazo(void* args) {
+    pthread_t hilo_interrupciones;
+    crear_hilo_interrupcion(algoritmo_planificacion, hilo_interrupciones);
+    
+    while(1) {
+        sem_wait(&puedo_ejecutar_proceso);  // Wait until CPU is free
+        sem_wait(&cantidad_ready);          // Wait for ready process
+        pthread_mutex_lock(&mutex_plani_corta);
+        sem_wait(&sem_plan_corto);          // Pause if scheduling stopped
+        
+        pcb *proceso_a_ejecutar = NULL;
+        
+        if (planificacion_activa && !list_is_empty(cola_ready->elements)) {
+            // Select next process based on algorithm
+            proceso_a_ejecutar = obtener_siguiente_proceso(algoritmo_planificacion);
+        }
+        
+        if (proceso_a_ejecutar != NULL) {
+            agregar_a_exec(proceso_a_ejecutar);
+            send_pcb(proceso_a_ejecutar, fd_cpu_dispatch);  // Send to CPU
+            sem_post(&control_interrupciones_rr);  // Start quantum timer
+        } else {
+            sem_post(&puedo_ejecutar_proceso);
+        }
+        
+        sem_post(&sem_plan_corto);
+        pthread_mutex_unlock(&mutex_plani_corta);
+    }
+}
+```
+
+## Scheduling Algorithms
+
+### Algorithm Dispatcher
+
+```c:kernel/src/main.c
+pcb* obtener_siguiente_proceso(char* algoritmo_planificacion) {
+    if (strcmp(algoritmo_planificacion, "FIFO") == 0) {
+        return obtenerSiguienteFIFO();
+    } else if (strcmp(algoritmo_planificacion, "RR") == 0) {
+        return obtenerSiguienteRR();
+    } else if (strcmp(algoritmo_planificacion, "PRIORIDADES") == 0) {
+        return obtenerSiguientePRIORIDADES();
+    } else {
+        return NULL;
+    }
+}
+```
+
+### FIFO (First-In-First-Out)
+
+**Non-preemptive** - processes run to completion or until blocked:
+
+```c:kernel/src/main.c
+pcb* obtenerSiguienteFIFO() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    procesoPlanificado = queue_pop(cola_ready);  // Get first process
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+```
+
+**Characteristics:**
+- Simple queue (first come, first served)
+- No preemption - no interrupt thread needed
+- Fair in terms of waiting time
+- Can lead to poor turnaround time for short processes
+
+### Round Robin (RR)
+
+**Preemptive with time quantum**:
+
+```c:kernel/src/main.c
+pcb* obtenerSiguienteRR() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    procesoPlanificado = queue_pop(cola_ready);  // Get first process
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+```
+
+**Quantum Management:**
+
+```c:kernel/src/main.c
+void controlar_interrupcion_rr() {
+    while(1) {
+        sem_wait(&control_interrupciones_rr);  // Wait for process dispatch
+        cpu_disponible = false;
+        
+        log_info(logger_kernel, "Inicia Quantum");
+        usleep(quantum * 1000);  // Wait for quantum to expire
+        log_info(logger_kernel, "Quantum Finalizado");
+        
+        if (!cpu_disponible) {
+            // Check if there are processes in EXEC and READY
+            if (list_size(cola_exec->elements) > 0 && list_size(cola_ready->elements) > 0) {
+                if (!hay_exit && !pcb_desalojado) {
+                    pthread_mutex_lock(&mutex_exec);
+                    pcb* proceso = queue_peek(cola_exec);
+                    pthread_mutex_unlock(&mutex_exec);
+                    
+                    hay_interrupcion = true;
+                    send_interrupcion(proceso->pid, fd_cpu_interrupt);
+                    log_info(logger_kernel, "PID: %d - Desalojado por fin de Quantum", proceso->pid);
+                } else {
+                    hay_exit = false;
+                }
+            }
+        }
+    }
+}
+```
+
+**Characteristics:**
+- Each process gets a time slice (quantum)
+- Preempted processes return to end of READY queue
+- Good response time for interactive processes
+- Quantum size affects performance (too small = overhead, too large = poor response)
+
+### Priority Scheduling
+
+**Preemptive based on priority**:
+
+```c:kernel/src/main.c
+pcb* obtenerSiguientePRIORIDADES() {
+    pcb* procesoPlanificado = NULL;
+    pthread_mutex_lock(&mutex_ready);
+    
+    // Sort by priority (lower number = higher priority)
+    t_list* lista_ordenada = list_sorted(cola_ready->elements, cmp);
+    procesoPlanificado = list_remove(lista_ordenada, 0);  // Get highest priority
+    list_remove_element(cola_ready->elements, procesoPlanificado);
+    
+    pthread_mutex_unlock(&mutex_ready);
+    return procesoPlanificado;
+}
+
+// Comparison function (ascending order)
+bool cmp(void *a, void *b) { 
+    pcb* pa = a;
+    pcb* pb = b;
+    int intA = pa->prioridad;
+    int intB = pb->prioridad; 
+    return intA < intB;  // Lower priority value = higher priority
+}
+```
+
+**Priority Preemption:**
+
+```c:kernel/src/main.c
+void controlar_interrupcion_prioridades() {
+    while(1) {
+        sem_wait(&control_interrupciones_prioridades);  // Triggered when process enters READY
+        cpu_disponible = false;
+        
+        // Check if a higher priority process arrived
+        if (list_size(cola_exec->elements) > 0 && list_size(cola_ready->elements) > 0) {
+            pthread_mutex_lock(&mutex_exec);
+            pcb* proceso = queue_peek(cola_exec);
+            pthread_mutex_unlock(&mutex_exec);
+            
+            // Get highest priority in READY queue
+            t_list* lista_ordenada = list_sorted(cola_ready->elements, cmp);
+            int prioridadAComparar = ((pcb*)list_get(lista_ordenada, 0))->prioridad;
+            
+            if (hay_exit == false) {
+                // Preempt if higher priority process is ready
+                if (prioridadAComparar < proceso->prioridad) {
+                    log_info(logger_kernel, "PID: %d - Desalojado por prioridad", proceso->pid);
+                    hay_interrupcion = true;
+                    send_interrupcion(proceso->pid, fd_cpu_interrupt);
+                }
+            } else {
+                hay_exit = false;
+            }
+        }
+    }
+}
+```
+
+**Characteristics:**
+- Always executes highest priority ready process
+- Preempts lower priority running process when higher priority arrives
+- Can lead to starvation of low priority processes
+- Priority values: lower number = higher priority
+
+## Context Switching
+
+### Context Switch Triggers
+
+1. **Quantum expiration** (Round Robin)
+2. **Higher priority arrival** (Priority scheduling)
+3. **Process blocks** (I/O, resource wait)
+4. **Process terminates**
+5. **Explicit yield**
+
+### Context Switch Process
+
+**Saving context:**
+
+```c:kernel/src/main.c
+pcb* sacar_de_exec() {
+    pcb_desalojado = true;
+    sem_wait(&cantidad_exec);
+    pthread_mutex_lock(&mutex_exec);
+    pcb *proceso = queue_pop(cola_exec);
+    pthread_mutex_unlock(&mutex_exec);
+    return proceso;
+}
+```
+
+**Restoring context:**
+
+```c:kernel/src/main.c
+void agregar_a_exec(pcb* proceso) {
+    pcb_desalojado = false;
+    cambiar_estado(proceso, EXEC);
+    pthread_mutex_lock(&mutex_exec);
+    queue_push(cola_exec, proceso);
+    pthread_mutex_unlock(&mutex_exec);
+    sem_post(&cantidad_exec);
+}
+```
+
+**CPU receives PCB** with complete context (PC, registers, state):
+
+```c:utils/src/protocolo/protocolo.c
+void send_pcb(pcb* contexto, int fd_modulo) {
+    t_paquete* paquete = crear_paquete(ENVIO_PCB);
+    empaquetar_pcb(paquete, contexto);
+    enviar_paquete(paquete, fd_modulo);
+    eliminar_paquete(paquete);
+}
+```
+
+## State Transitions
+
+### NEW → READY
+
+```c:kernel/src/main.c
+void agregar_a_ready(pcb* proceso) {
+    cambiar_estado(proceso, READY);
+    pthread_mutex_lock(&mutex_ready);
+    queue_push(cola_ready, proceso);
+    pthread_mutex_unlock(&mutex_ready);
+    
+    // Log ready queue
+    t_list *lista_a_loguear = pid_lista_ready(cola_ready->elements);
+    char *lista = list_to_string(lista_a_loguear);
+    log_info(logger_kernel, "Cola Ready %s: %s", algoritmo_planificacion, lista);
+    list_destroy(lista_a_loguear);
+    free(lista);
+    
+    sem_post(&cantidad_ready);
+    sem_post(&control_interrupciones_prioridades);  // Check for priority preemption
+}
+```
+
+### READY → EXEC
+
+Handled by short-term scheduler (see above)
+
+### EXEC → READY
+
+**Preemption:**
+
+```c:kernel/src/main.c
+case PCB_INTERRUPCION: {
+    recv_pcbDesalojado(fd_cpu_dispatch, &proceso, &extra);
+    pcb_a_borrar = sacar_de_exec();
+    agregar_a_ready(proceso);  // Return to READY queue
+    sem_post(&puedo_ejecutar_proceso);
+    break;
+}
+```
+
+### EXEC → BLOCK
+
+**Resource wait:**
+
+```c:kernel/src/main.c
+void agregar_a_block(pcb* proceso) {
+    cambiar_estado(proceso, BLOCK);
+    pthread_mutex_lock(&mutex_block);
+    queue_push(cola_block, proceso);
+    pthread_mutex_unlock(&mutex_block);
+    sem_post(&cantidad_block);
+}
+```
+
+### BLOCK → READY
+
+**After I/O completion or resource release:**
+
+```c:kernel/src/main.c
+// Example: after file operation completes
+proceso = buscar_y_remover_pcb_cola(cola_block, proceso->pid, cantidad_block, mutex_block);
+agregar_a_ready(proceso);
+pcb_desalojado = false;
+```
+
+### EXEC → EXIT
+
+```c:kernel/src/main.c
+case PCB_EXIT: {
+    hay_exit = true;
+    recv_pcbDesalojado(fd_cpu_dispatch, &proceso, &extra);
+    pcb_a_borrar = sacar_de_exec();
+    pcb_destroyer(pcb_a_borrar);
+    
+    agregar_a_exit(proceso);
+    sem_post(&cantidad_multiprogramacion);  // Free slot
+    sem_post(&puedo_ejecutar_proceso);
+    
+    liberar_recursos_proceso(proceso);
+    send_terminar_proceso(proceso->pid, fd_memoria);
+    break;
+}
+```
+
+## Scheduler Control
+
+### Start/Stop Scheduling
+
+**Pause scheduling:**
+
+```c:kernel/src/main.c
+void detener_planificacion() {
+    planificacion_activa = false;
+    pthread_mutex_lock(&mutex_plani_larga);
+    sem_wait(&sem_plan_largo);
+    pthread_mutex_unlock(&mutex_plani_larga);
+    
+    pthread_mutex_lock(&mutex_plani_corta); 
+    sem_wait(&sem_plan_corto);
+    pthread_mutex_unlock(&mutex_plani_corta);
+    
+    log_info(logger_kernel, "PAUSA DE PLANIFICACIÓN");
+}
+```
+
+**Resume scheduling:**
+
+```c:kernel/src/main.c
+void iniciar_planificacion() {
+    if (planificacion_activa == false) {
+        sem_post(&sem_plan_largo);
+        sem_post(&sem_plan_corto);
+        log_info(logger_kernel, "INICIO DE PLANIFICACIÓN");
+    }
+    planificacion_activa = true;
+}
+```
+
+### Dynamic Multiprogramming
+
+```c:kernel/src/main.c
+void cambiar_multiprogramacion(char* nuevo_grado_multiprogramacion) {
+    log_info(logger_kernel, "Grado Anterior: %d - Grado Actual: %d", 
+            grado_multiprogramacion, atoi(nuevo_grado_multiprogramacion));
+    
+    // Reduce available slots if decreasing
+    while (grado_multiprogramacion > atoi(nuevo_grado_multiprogramacion)) {
+        sem_wait(&cantidad_multiprogramacion);
+        grado_multiprogramacion--;
+    }
+}
+```
+
+## Thread Safety
+
+All scheduling operations use synchronization primitives:
+
+**Semaphores:**
+```c:kernel/src/main.c
+sem_t cantidad_multiprogramacion;  // Available process slots
+sem_t cantidad_ready;              // Number of ready processes
+sem_t puedo_ejecutar_proceso;      // CPU availability
+sem_t control_interrupciones_rr;   // Quantum control
+sem_t control_interrupciones_prioridades;  // Priority preemption control
+```
+
+**Mutexes:**
+```c:kernel/src/main.c
+pthread_mutex_t mutex_ready;       // Protects READY queue
+pthread_mutex_t mutex_exec;        // Protects EXEC queue
+pthread_mutex_t mutex_block;       // Protects BLOCK queue
+```

@@ -1,0 +1,619 @@
+---
+title: 'Inter-Process Communication Design'
+description: 'Socket-based IPC, protocol implementation, message passing, and packet structure'
+---
+
+## Overview
+
+MAPPA OS uses **TCP socket-based communication** for inter-process communication between modules (Kernel, CPU, Memory, Filesystem). The protocol supports structured message passing with operation codes (opcodes) and serialized data packets.
+
+## Communication Architecture
+
+### Module Connections
+
+```
+┌─────────┐     ┌─────────┐
+│ Kernel  │────▶│   CPU   │ (Dispatch)
+│         │────▶│         │ (Interrupt)
+│         │     └─────────┘
+│         │
+│         │     ┌─────────┐
+│         │────▶│ Memory  │
+│         │     └─────────┘
+│         │
+│         │     ┌────────────┐
+└─────────┘────▶│ Filesystem │
+                 └────────────┘
+                        ▲
+                        │
+                  ┌─────────┐
+                  │ Memory  │
+                  └─────────┘
+```
+
+### Socket Types
+
+**Server sockets** (listening):
+```c:utils/src/sockets/sockets.c
+int iniciar_servidor(t_log* logger, char* ip, char* puerto, char* nombre) {
+    int socket_servidor;
+    struct addrinfo hints, *servinfo;
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    
+    getaddrinfo(ip, puerto, &hints, &servinfo);
+    
+    socket_servidor = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
+    int yes = 1;
+    setsockopt(socket_servidor, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    
+    bind(socket_servidor, servinfo->ai_addr, servinfo->ai_addrlen);
+    listen(socket_servidor, SOMAXCONN);
+    
+    log_info(logger, "Escuchando en %s", nombre);
+    freeaddrinfo(servinfo);
+    
+    return socket_servidor;
+}
+```
+
+**Client sockets** (connecting):
+```c:utils/src/sockets/sockets.c
+int crear_conexion(t_log *logger, const char *server_name, char *ip, char *puerto) {
+    struct addrinfo hints;
+    struct addrinfo *server_info;
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    
+    getaddrinfo(ip, puerto, &hints, &server_info);
+    
+    int socket_cliente = socket(server_info->ai_family,
+                                server_info->ai_socktype,
+                                server_info->ai_protocol);
+    
+    if (socket_cliente == -1) {
+        log_error(logger, "Error creando el socket para %s:%s", ip, puerto);
+        return 0;
+    }
+    
+    if (connect(socket_cliente, server_info->ai_addr, server_info->ai_addrlen) == -1) {
+        perror("Error al conectarse");
+        log_error(logger, "Error al conectarme (a %s)\n", server_name);
+        freeaddrinfo(server_info);
+        return 0;
+    } else {
+        log_info(logger, "Me conecte en %s:%s (a %s)\n", ip, puerto, server_name);
+    }
+    
+    freeaddrinfo(server_info);
+    return socket_cliente;
+}
+```
+
+**Accept connections:**
+```c:utils/src/sockets/sockets.c
+int esperar_cliente(t_log* logger, const char* name, int socket_servidor) {
+    struct sockaddr_in dir_cliente;
+    socklen_t tam_direccion = sizeof(struct sockaddr_in);
+    
+    int socket_cliente = accept(socket_servidor, (void*) &dir_cliente, &tam_direccion);
+    log_info(logger, "Cliente conectado a %s", name);
+    
+    return socket_cliente;
+}
+```
+
+## Protocol Implementation
+
+### Operation Codes
+
+```c:utils/src/protocolo/protocolo.h
+typedef enum {
+    // Message types
+    MENSAJE,
+    PAQUETE,
+    
+    // Process management
+    ENVIO_PCB,
+    INICIALIZAR_PROCESO,
+    FINALIZAR_PROCESO,
+    PCB_EXIT,
+    PCB_INTERRUPCION,
+    PCB_PAGEFAULT,
+    
+    // Scheduling
+    PCB_SIGNAL,
+    PCB_WAIT,
+    PCB_SLEEP,
+    INTERRUPCION,
+    
+    // Memory management
+    PEDIDO_MARCO,
+    ENVIO_MARCO,
+    CARGAR_PAGINA,
+    PAGINA_CARGADA,
+    
+    // Swap operations
+    RESERVA_SWAP,
+    BLOQUES_RESERVADOS,
+    LIBERACION_SWAP,
+    PEDIDO_SWAP,
+    ESCRIBIR_SWAP,
+    
+    // File operations
+    ABRIR_ARCHIVO,
+    CREAR_ARCHIVO,
+    TRUNCAR_ARCHIVO,
+    F_OPEN,
+    F_CLOSE,
+    F_READ,
+    F_WRITE,
+    F_SEEK,
+    F_TRUNCATE,
+    
+    // Instructions
+    ENVIO_INSTRUCCION,
+    SET,
+    ADD,
+    MOV_IN,
+    MOV_OUT,
+    IO,
+    EXIT,
+    // ...
+} op_code;
+```
+
+### Packet Structure
+
+**Buffer:**
+```c:utils/src/protocolo/protocolo.h
+typedef struct {
+    int size;      // Size of the data stream
+    void *stream;  // Data stream
+} t_buffer;
+```
+
+**Packet:**
+```c:utils/src/protocolo/protocolo.h
+typedef struct {
+    op_code codigo_operacion;  // Operation code
+    t_buffer *buffer;          // Data buffer
+} t_paquete;
+```
+
+### Packet Wire Format
+
+```
+┌──────────────┬──────────────┬────────────────────┐
+│   op_code    │ buffer_size  │   buffer_stream    │
+│  (4 bytes)   │  (4 bytes)   │  (variable size)   │
+└──────────────┴──────────────┴────────────────────┘
+```
+
+## Message Passing
+
+### Simple Messages
+
+**Send:**
+```c:utils/src/protocolo/protocolo.c
+void enviar_mensaje(char* mensaje, int socket_cliente) {
+    t_paquete* paquete = malloc(sizeof(t_paquete));
+    paquete->codigo_operacion = MENSAJE;
+    paquete->buffer = malloc(sizeof(t_buffer));
+    paquete->buffer->size = strlen(mensaje) + 1;
+    paquete->buffer->stream = malloc(paquete->buffer->size);
+    memcpy(paquete->buffer->stream, mensaje, paquete->buffer->size);
+    
+    int bytes = paquete->buffer->size + 2*sizeof(int);
+    void* a_enviar = serializar_paquete(paquete, bytes);
+    
+    send(socket_cliente, a_enviar, bytes, 0);
+    
+    free(a_enviar);
+    eliminar_paquete(paquete);
+}
+```
+
+**Receive:**
+```c:utils/src/protocolo/protocolo.c
+void recibir_mensaje(t_log* logger, int socket_cliente) {
+    int size;
+    char* buffer = (char*)recibir_buffer(&size, socket_cliente);
+    if (buffer != NULL) {
+        log_info(logger, "Me llegó el mensaje: %s", buffer);
+        free(buffer);
+    }
+}
+```
+
+### Packet Creation
+
+```c:utils/src/protocolo/protocolo.c
+t_paquete* crear_paquete(op_code codigo_op) {
+    t_paquete* paquete = malloc(sizeof(t_paquete));
+    paquete->codigo_operacion = codigo_op;
+    crear_buffer(paquete);
+    return paquete;
+}
+
+void crear_buffer(t_paquete* paquete) {
+    paquete->buffer = malloc(sizeof(t_buffer));
+    paquete->buffer->size = 0;
+    paquete->buffer->stream = NULL;
+}
+```
+
+### Adding Data to Packets
+
+```c:utils/src/protocolo/protocolo.c
+void agregar_a_paquete(t_paquete* paquete, void* valor, int tamanio) {
+    // Reallocate stream to accommodate new data
+    paquete->buffer->stream = realloc(paquete->buffer->stream, 
+                                     paquete->buffer->size + tamanio + sizeof(int));
+    
+    // Add size prefix
+    memcpy(paquete->buffer->stream + paquete->buffer->size, &tamanio, sizeof(int));
+    
+    // Add data
+    memcpy(paquete->buffer->stream + paquete->buffer->size + sizeof(int), valor, tamanio);
+    
+    paquete->buffer->size += tamanio + sizeof(int);
+}
+```
+
+### Packet Serialization
+
+```c:utils/src/protocolo/protocolo.c
+void* serializar_paquete(t_paquete* paquete, int bytes) {
+    int size_paquete = sizeof(int) + sizeof(int) + paquete->buffer->size;
+    void* paquete_serializado = malloc(size_paquete);
+    int offset = 0;
+    
+    // Serialize opcode
+    memcpy(paquete_serializado + offset, &(paquete->codigo_operacion), sizeof(int));
+    offset += sizeof(int);
+    
+    // Serialize buffer size
+    memcpy(paquete_serializado + offset, &(paquete->buffer->size), sizeof(int));
+    offset += sizeof(int);
+    
+    // Serialize buffer stream
+    memcpy(paquete_serializado + offset, paquete->buffer->stream, paquete->buffer->size);
+    
+    return paquete_serializado; 
+}
+```
+
+### Sending Packets
+
+```c:utils/src/protocolo/protocolo.c
+void enviar_paquete(t_paquete* paquete, int socket_cliente) {
+    int bytes = paquete->buffer->size + sizeof(int) + sizeof(op_code);
+    void* a_enviar = serializar_paquete(paquete, bytes);
+    
+    send(socket_cliente, a_enviar, bytes, 0);
+    
+    free(a_enviar);
+}
+```
+
+### Receiving Packets
+
+**Receive operation code:**
+```c:utils/src/protocolo/protocolo.c
+int recibir_operacion(int socket_cliente) {
+    int cod_op;
+    if (recv(socket_cliente, &cod_op, sizeof(int), MSG_WAITALL) > 0)
+        return cod_op;
+    else {
+        close(socket_cliente);
+        return -1;
+    }
+}
+```
+
+**Receive buffer:**
+```c:utils/src/protocolo/protocolo.c
+void* recibir_buffer(int* size, int socket_cliente) {
+    void* buffer;
+    
+    recv(socket_cliente, size, sizeof(int), MSG_WAITALL);
+    buffer = malloc(*size);
+    recv(socket_cliente, buffer, *size, MSG_WAITALL);
+    
+    return buffer;
+}
+```
+
+**Receive and parse packet:**
+```c:utils/src/protocolo/protocolo.c
+t_list* recibir_paquete(int socket_cliente) {
+    int size;
+    int desplazamiento = 0;
+    void* buffer;
+    t_list* valores = list_create();
+    int tamanio;
+    
+    buffer = recibir_buffer(&size, socket_cliente);
+    
+    if (buffer == NULL) {
+        list_destroy(valores);
+        return NULL;
+    }
+    
+    // Parse buffer into list of values
+    while (desplazamiento < size) {
+        memcpy(&tamanio, buffer + desplazamiento, sizeof(int));
+        desplazamiento += sizeof(int);
+        
+        char* valor = malloc(tamanio);
+        memcpy(valor, buffer + desplazamiento, tamanio);
+        desplazamiento += tamanio;
+        
+        list_add(valores, valor);
+    }
+    
+    free(buffer);
+    return valores;
+}
+```
+
+## Complex Data Structures
+
+### PCB Serialization
+
+**Pack PCB:**
+```c:utils/src/protocolo/protocolo.c
+void empaquetar_pcb(t_paquete* paquete, pcb* contexto) {
+    agregar_a_paquete(paquete, &(contexto->pid), sizeof(int));
+    agregar_a_paquete(paquete, &(contexto->pc), sizeof(int));
+    agregar_a_paquete(paquete, &(contexto->size), sizeof(int));
+    agregar_a_paquete(paquete, &(contexto->prioridad), sizeof(int));
+    agregar_a_paquete(paquete, &(contexto->tiempo_ejecucion), sizeof(int));
+    agregar_a_paquete(paquete, (contexto->path), strlen(contexto->path) + 1);
+    agregar_a_paquete(paquete, &(contexto->estado), sizeof(estado_proceso));
+    empaquetar_registros(paquete, contexto->registros);
+    empaquetar_archivos(paquete, contexto->archivos);
+}
+```
+
+**Unpack PCB:**
+```c:utils/src/protocolo/protocolo.c
+pcb* desempaquetar_pcb(t_list* paquete, int* counter) {
+    pcb* contexto = malloc(sizeof(pcb));
+    
+    int* pid = list_get(paquete, 0);
+    contexto->pid = *pid;
+    free(pid);
+    
+    int* pc = list_get(paquete, 1);
+    contexto->pc = *pc;
+    free(pc);
+    
+    int* size = list_get(paquete, 2);
+    contexto->size = *size;
+    free(size);
+    
+    int* prioridad = list_get(paquete, 3);
+    contexto->prioridad = *prioridad;
+    free(prioridad);
+    
+    int* tiempo_ejecucion = list_get(paquete, 4);
+    contexto->tiempo_ejecucion = *tiempo_ejecucion;
+    free(tiempo_ejecucion);
+    
+    char* path = list_get(paquete, 5);
+    contexto->path = malloc(strlen(path) + 1);
+    strcpy(contexto->path, path);
+    free(path);
+    
+    estado_proceso* estado = list_get(paquete, 6);
+    contexto->estado = *estado;
+    free(estado);
+    
+    int comienzo_registros = 7;
+    t_registros* registro_contexto = desempaquetar_registros(paquete, comienzo_registros);
+    contexto->registros = registro_contexto;
+    
+    *counter = comienzo_registros + 4;
+    t_list* archivos = desempaquetar_archivos(paquete, counter);
+    contexto->archivos = archivos;
+    
+    if (contexto->path == NULL || contexto->registros == NULL || contexto->archivos == NULL) {
+        free(contexto->path);
+        registros_destroy(contexto->registros);
+        lista_archivos_destroy(contexto->archivos);
+        free(contexto);
+        return NULL;
+    }
+    
+    return contexto;
+}
+```
+
+**Send/Receive PCB:**
+```c:utils/src/protocolo/protocolo.c
+void send_pcb(pcb* contexto, int fd_modulo) {
+    t_paquete* paquete = crear_paquete(ENVIO_PCB);
+    empaquetar_pcb(paquete, contexto);
+    enviar_paquete(paquete, fd_modulo);
+    eliminar_paquete(paquete);
+}
+
+pcb* recv_pcb(int fd_modulo) {
+    t_list* paquete = recibir_paquete(fd_modulo);
+    int counter = 0;
+    pcb* contexto_recibido = desempaquetar_pcb(paquete, &counter);
+    list_destroy(paquete);
+    return contexto_recibido;
+}
+```
+
+### Registers Serialization
+
+```c:utils/src/protocolo/protocolo.c
+void empaquetar_registros(t_paquete* paquete, t_registros* registro) {
+    agregar_a_paquete(paquete, registro->ax, sizeof(uint32_t));
+    agregar_a_paquete(paquete, registro->bx, sizeof(uint32_t));
+    agregar_a_paquete(paquete, registro->cx, sizeof(uint32_t));
+    agregar_a_paquete(paquete, registro->dx, sizeof(uint32_t));
+}
+
+t_registros* desempaquetar_registros(t_list* paquete, int posicion) {
+    t_registros *registro = malloc(sizeof(t_registros));
+    
+    uint32_t* ax = list_get(paquete, posicion);
+    registro->ax = malloc(sizeof(uint32_t));
+    memcpy(registro->ax, ax, sizeof(uint32_t));
+    free(ax);
+    
+    uint32_t* bx = list_get(paquete, posicion+1);
+    registro->bx = malloc(sizeof(uint32_t));
+    memcpy(registro->bx, bx, sizeof(uint32_t));
+    free(bx);
+    
+    uint32_t* cx = list_get(paquete, posicion+2);
+    registro->cx = malloc(sizeof(uint32_t));
+    memcpy(registro->cx, cx, sizeof(uint32_t));
+    free(cx);
+    
+    uint32_t* dx = list_get(paquete, posicion+3);
+    registro->dx = malloc(sizeof(uint32_t));
+    memcpy(registro->dx, dx, sizeof(uint32_t));
+    free(dx);
+    
+    return registro;
+}
+```
+
+## Communication Patterns
+
+### Request-Response
+
+**Example: Memory access**
+
+```c
+// CPU requests frame number
+send_pedido_marco(fd_memoria, pid, pagina);
+op_code response = recibir_operacion(fd_memoria);
+
+if (response == ENVIO_MARCO) {
+    int marco = recv_marco(fd_memoria);
+    // Use frame number
+} else if (response == PCB_PAGEFAULT) {
+    // Handle page fault
+}
+```
+
+### Asynchronous Notifications
+
+**Example: Quantum interrupt**
+
+```c:kernel/src/main.c
+// Kernel sends interrupt to CPU
+send_interrupcion(proceso->pid, fd_cpu_interrupt);
+
+// CPU receives and handles interrupt
+int pid_interrupcion = recv_interrupcion(fd_cpu_interrupt);
+// Preempt process with matching PID
+```
+
+### One-way Messages
+
+**Example: Process termination**
+
+```c:kernel/src/main.c
+// Kernel notifies memory to free process resources
+send_terminar_proceso(proceso->pid, fd_memoria);
+
+// Memory receives and frees resources
+int pid_fin = recv_terminar_proceso(cliente_socket);
+terminar_proceso(pid_fin);
+```
+
+## Memory Management
+
+### Packet Cleanup
+
+```c:utils/src/protocolo/protocolo.c
+void eliminar_paquete(t_paquete* paquete) {
+    free(paquete->buffer->stream);
+    free(paquete->buffer);
+    free(paquete);
+}
+```
+
+### Connection Cleanup
+
+```c:utils/src/sockets/sockets.c
+void liberar_conexion(int socket_cliente) {
+    close(socket_cliente);
+    socket_cliente = -1;
+}
+```
+
+## Thread-Safe Communication
+
+Each module uses dedicated threads for receiving messages:
+
+```c:memoria/src/main.c
+static void procesar_conexion(void *void_args) {
+    int *args = (int*) void_args;
+    int cliente_socket = *args;
+    op_code cop;
+    
+    while (cliente_socket != -1) {
+        if (recv(cliente_socket, &cop, sizeof(op_code), 0) != sizeof(op_code)) {
+            log_info(logger_memoria, "El cliente se desconecto");
+            return;
+        }
+        
+        switch (cop) {
+            case MENSAJE:
+                // Handle message
+                break;
+            case PEDIDO_MARCO:
+                // Handle frame request
+                break;
+            // ... other cases
+        }
+    }
+}
+```
+
+## Error Handling
+
+### Connection Errors
+
+```c:utils/src/protocolo/protocolo.c
+int recibir_operacion(int socket_cliente) {
+    int cod_op;
+    if (recv(socket_cliente, &cod_op, sizeof(int), MSG_WAITALL) > 0)
+        return cod_op;
+    else {
+        close(socket_cliente);
+        return -1;  // Error or disconnection
+    }
+}
+```
+
+### Null Checks
+
+```c:utils/src/protocolo/protocolo.c
+t_list* recibir_paquete(int socket_cliente) {
+    // ...
+    buffer = recibir_buffer(&size, socket_cliente);
+    
+    if (buffer == NULL) {
+        list_destroy(valores);
+        return NULL;  // Reception failed
+    }
+    // ...
+}
+```

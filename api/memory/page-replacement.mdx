@@ -1,0 +1,353 @@
+---
+title: 'Page Replacement API'
+description: 'Page replacement algorithms (FIFO and LRU) for memory management'
+---
+
+## Overview
+
+The page replacement API provides algorithms for selecting victim pages when physical memory is full. The system supports two algorithms: FIFO (First-In-First-Out) and LRU (Least Recently Used), configurable via the `ALGORITMO_REEMPLAZO` configuration parameter.
+
+## Algorithm Selection
+
+### usar_algoritmo
+
+Selects and invokes the configured page replacement algorithm.
+
+```c
+int usar_algoritmo(int pid, int num_pagina)
+```
+
+**Parameters:**
+- `pid`: Process ID of the incoming page
+- `num_pagina`: Logical page number to be loaded
+
+**Returns:**
+- `int`: Physical frame number of the evicted page (to be reused for the incoming page)
+
+**Description:**
+
+Determines which replacement algorithm to use based on the `algoritmo_reemplazo` configuration string:
+- `"FIFO"`: Calls `algoritmo_fifo()`
+- `"LRU"`: Calls `algoritmo_lru()`
+- Returns -1 if the algorithm name is invalid
+
+**Source:** memoria/src/main.c:684-694
+
+## FIFO Algorithm
+
+### algoritmo_fifo
+
+Implements the First-In-First-Out page replacement algorithm.
+
+```c
+int algoritmo_fifo(int pid, int num_pagina)
+```
+
+**Parameters:**
+- `pid`: Process ID of the incoming page
+- `num_pagina`: Logical page number to be loaded
+
+**Returns:**
+- `int`: Physical frame number of the evicted page
+
+**Description:**
+
+Replaces the oldest page in memory using a FIFO strategy. The algorithm follows these steps:
+
+1. **Validation**: Checks if `lista_tablas_de_procesos` is empty; returns -1 if no pages exist
+
+2. **Select victim**: Removes the first entry from `paginas_en_memoria` (oldest page)
+
+3. **Logging**: Logs the replacement with the format:
+   ```
+   REEMPLAZO - Marco: <frame> - Page Out: <victim_pid> - <victim_page> - Page In: <pid> - <num_pagina>
+   ```
+
+4. **Write-back if modified**:
+   - If `paginaReemplazo->modificado == 1`, the page has been written to and must be saved to swap
+   - Reads the page content using `leer_registro_de_memoria_uint()`
+   - Converts the uint32_t value to a string
+   - Sends the data to filesystem via `ESCRIBIR_SWAP` packet with swap position and content
+   - Resets `modificado = 0`
+
+5. **Update victim page entry**:
+   - Sets `en_memoria = 0` to mark the page as not present
+
+6. **Update incoming page**:
+   - Sets `ultimo_tiempo_uso = time(NULL)` for the new page
+
+7. **Return frame**: Returns the frame number of the evicted page for reuse
+
+**Example log output:**
+```
+REEMPLAZO - Marco: 5 - Page Out: 1 - 3 - Page In: 2 - 7
+```
+This indicates frame 5 is being freed by evicting page 3 of process 1 to load page 7 of process 2.
+
+**Source:** memoria/src/main.c:773-824
+
+## LRU Algorithm
+
+### algoritmo_lru
+
+Implements the Least Recently Used page replacement algorithm.
+
+```c
+int algoritmo_lru(int pid, int num_pagina)
+```
+
+**Parameters:**
+- `pid`: Process ID of the incoming page
+- `num_pagina`: Logical page number to be loaded
+
+**Returns:**
+- `int`: Physical frame number of the evicted page
+
+**Description:**
+
+Replaces the least recently used page in memory. The algorithm is nearly identical to FIFO but with an important difference:
+
+1. **Validation**: Checks if `lista_tablas_de_procesos` is empty; returns -1 if no pages exist
+
+2. **Sort by usage time**: Calls `list_sort(paginas_en_memoria, compararTiempoUso)` to order pages by `ultimo_tiempo_uso` (oldest first)
+
+3. **Select victim**: Removes the first entry from the sorted list (least recently used page)
+
+4. **Logging**: Logs the replacement with the format:
+   ```
+   REEMPLAZO - Marco: <frame> - Page Out: <victim_pid> - <victim_page> - Page In: <pid> - <num_pagina>
+   ```
+
+5. **Write-back if modified**:
+   - If `paginaReemplazo->modificado == 1`, saves the page to swap
+   - Reads the page content using `leer_registro_de_memoria_uint()`
+   - Converts the uint32_t value to a string
+   - Sends the data to filesystem via `ESCRIBIR_SWAP` packet
+   - Resets `modificado = 0`
+
+6. **Update victim page entry**:
+   - Sets `en_memoria = 0` to mark the page as not present
+
+7. **Update incoming page**:
+   - Sets `ultimo_tiempo_uso = time(NULL)` for the new page
+
+8. **Return frame**: Returns the frame number of the evicted page for reuse
+
+**Key difference from FIFO**: The LRU algorithm sorts the `paginas_en_memoria` list by access time before selecting the victim, ensuring the least recently accessed page is chosen rather than the oldest loaded page.
+
+**Source:** memoria/src/main.c:698-750
+
+### compararTiempoUso
+
+Comparison function for sorting pages by usage time.
+
+```c
+bool compararTiempoUso(void *unaPag, void *otraPag)
+```
+
+**Parameters:**
+- `unaPag`: First page entry to compare
+- `otraPag`: Second page entry to compare
+
+**Returns:**
+- `bool`: true if the first page was used before the second page (tiempo1 < tiempo2)
+
+**Description:**
+
+Compares two `entrada_pagina` structures by their `ultimo_tiempo_uso` field. Used by `list_sort()` in the LRU algorithm to order pages from least recently used to most recently used.
+
+**Source:** memoria/src/main.c:751-757
+
+## Page Table Entry Fields
+
+The following fields in `entrada_pagina` are critical for page replacement:
+
+### modificado
+
+```c
+int modificado;  // Modified/dirty bit
+```
+
+**Purpose**: Indicates whether the page has been written to since it was loaded from swap.
+
+**Values**:
+- `0`: Page is clean (matches swap copy)
+- `1`: Page is dirty (has been modified)
+
+**Usage**:
+- Set to `0` when a page is first initialized or loaded from swap
+- Set to `1` by `marcar_pagina_modificada()` after write operations (MOV_OUT)
+- Checked by replacement algorithms to determine if write-back to swap is needed
+- Reset to `0` after successfully writing the page to swap
+
+**Example**:
+```c
+// From main.c:239 - Mark page as modified after write
+marcar_pagina_modificada(direccion.marco);
+
+// From main.c:786-810 - Write-back modified page in FIFO
+if (paginaReemplazo->modificado == 1) {
+    // Read page content and write to swap
+    // ...
+    paginaReemplazo->modificado = 0;
+}
+```
+
+### en_memoria
+
+```c
+int en_memoria;  // Presence bit
+```
+
+**Purpose**: Indicates whether the page is currently loaded in physical memory.
+
+**Values**:
+- `0`: Page is not in physical memory (on swap only)
+- `1`: Page is present in physical memory
+
+**Usage**:
+- Set to `0` when a page is first initialized
+- Set to `1` by `tratar_page_fault()` when a page is loaded into memory
+- Set to `0` by replacement algorithms when a page is evicted
+- Checked by `obtener_nro_marco_memoria()` to determine if translation is valid
+
+**Example**:
+```c
+// From main.c:306 - Check if page is in memory
+if(pagina->en_memoria == 1){
+    log_info(logger_memoria, "PID: %d - Pagina: %d - Marco: %d",
+             pid_actual, num_pagina, pagina->num_marco);
+    return pagina->num_marco;
+}
+```
+
+### ultimo_tiempo_uso
+
+```c
+time_t ultimo_tiempo_uso;  // Last access timestamp
+```
+
+**Purpose**: Records the last time the page was accessed, used by the LRU algorithm.
+
+**Values**:
+- `NULL`: Page has never been accessed
+- `time_t`: Unix timestamp of last access
+
+**Usage**:
+- Set to `NULL` when a page is first initialized
+- Set to `time(NULL)` when:
+  - A page is loaded by `tratar_page_fault()`
+  - A page is read (MOV_IN operation)
+  - A page is written (MOV_OUT operation)
+- Used by `compararTiempoUso()` to sort pages for LRU replacement
+
+**Example**:
+```c
+// From main.c:218 - Update timestamp on read
+entrada_pagina* pagina = buscar_en_tabla_por_direccionfisica(direccion.marco);
+pagina->ultimo_tiempo_uso = time(NULL);
+
+// From main.c:703 - Sort by usage time for LRU
+list_sort(paginas_en_memoria, (void*) compararTiempoUso);
+```
+
+## Swap Integration
+
+Both replacement algorithms integrate with the swap system to persist modified pages:
+
+### Write-Back Process
+
+1. **Check modified bit**: `if (paginaReemplazo->modificado == 1)`
+
+2. **Read page from memory**:
+   ```c
+   DireccionFisica direccion;
+   direccion.marco = paginaReemplazo->num_marco;
+   direccion.desplazamiento = 0;
+   uint32_t* leido = leer_registro_de_memoria_uint(direccion);
+   ```
+
+3. **Convert to string**:
+   ```c
+   char valorStr[tam_pagina];
+   sprintf(valorStr, "%u", *leido);
+   char* valorChar = malloc(tam_pagina);
+   strcpy(valorChar, valorStr);
+   ```
+
+4. **Send to swap**:
+   ```c
+   t_paquete* paquete = crear_paquete(ESCRIBIR_SWAP);
+   agregar_a_paquete(paquete, &paginaReemplazo->posicion_swap, tam_pagina);
+   agregar_a_paquete(paquete, valorChar, tam_pagina);
+   enviar_paquete(paquete, conexion_memoria_filesystem);
+   eliminar_paquete(paquete);
+   ```
+
+5. **Clean up**:
+   ```c
+   free(valorChar);
+   free(leido);
+   paginaReemplazo->modificado = 0;
+   ```
+
+### posicion_swap
+
+```c
+int posicion_swap;  // Swap block number
+```
+
+**Purpose**: Stores the block number in swap space where this page is persisted.
+
+**Usage**:
+- Set during `inicializar_proceso()` from the `bloques_reservados` list
+- Used when writing modified pages back to swap
+- Used when reading pages from swap during page faults
+- Freed when the process terminates via `send_liberacion_swap()`
+
+## Global Variables
+
+```c
+char* algoritmo_reemplazo;      // "FIFO" or "LRU"
+t_list* paginas_en_memoria;     // List of entrada_pagina* currently in memory
+int conexion_memoria_filesystem; // Socket for swap communication
+int tam_pagina;                  // Page size in bytes
+```
+
+## Performance Considerations
+
+### FIFO Performance
+
+- **Time complexity**: O(1) for victim selection (removes first element)
+- **Memory overhead**: Minimal (relies on insertion order)
+- **Best use case**: Workloads with sequential access patterns
+- **Limitation**: May evict frequently used pages (Belady's anomaly)
+
+### LRU Performance
+
+- **Time complexity**: O(n log n) for victim selection (requires sorting)
+- **Memory overhead**: Stores timestamp for each page
+- **Best use case**: Workloads with temporal locality
+- **Advantage**: Better hit rate than FIFO in most scenarios
+
+### Access Time Tracking
+
+The `ultimo_tiempo_uso` field is updated on every memory access:
+- MOV_IN (read): main.c:218
+- MOV_OUT (write): main.c:243
+- Page fault resolution: main.c:546
+
+This ensures LRU has accurate information but adds overhead to every memory operation.
+
+## Configuration
+
+Set the replacement algorithm in the memory module configuration file:
+
+```ini
+ALGORITMO_REEMPLAZO=FIFO  # or LRU
+```
+
+The configuration is loaded in `levantar_config()` (main.c:16):
+```c
+algoritmo_reemplazo = config_get_string_value(config, "ALGORITMO_REEMPLAZO");
+```

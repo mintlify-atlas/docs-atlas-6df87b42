@@ -1,0 +1,401 @@
+---
+title: 'Memory Management Design'
+description: 'Paging implementation, page tables, page fault handling, and replacement algorithms'
+---
+
+## Overview
+
+The MAPPA OS memory module implements a **demand paging system** with virtual memory support. It manages physical memory using fixed-size pages, handles page faults, and implements replacement algorithms (FIFO and LRU) when physical memory is full.
+
+## Paging Implementation
+
+### Page Size and Memory Configuration
+
+Memory is divided into fixed-size **frames** (physical memory) and **pages** (virtual memory):
+
+```c
+// Configuration parameters (memoria/src/main.c)
+int tam_memoria;          // Total physical memory size
+int tam_pagina;           // Page/frame size (typically 1024 bytes)
+void* memoria;            // Physical memory buffer
+uint8_t* bitarray_marcos_ocupados;  // Frame allocation bitmap
+```
+
+The number of frames is calculated as:
+
+```c
+int get_memory_and_page_size() {
+    return (tam_memoria / tam_pagina);
+}
+```
+
+### Frame Allocation
+
+Frames are allocated on-demand using a **first-fit** algorithm:
+
+```c:memoria/src/main.c
+int buscar_marco_libre() {
+    pthread_mutex_lock(&mx_bitarray_marcos_ocupados);
+    for (int i = 0; i < get_memory_and_page_size(); i++) {
+        if (bitarray_marcos_ocupados[i] == 0) {
+            pthread_mutex_unlock(&mx_bitarray_marcos_ocupados);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&mx_bitarray_marcos_ocupados);
+    return -1;  // No free frames available
+}
+```
+
+## Page Table Structure
+
+### Page Table Entry (PTE)
+
+Each process has its own page table, composed of page table entries:
+
+```c:utils/src/protocolo/protocolo.h
+typedef struct {
+    int num_marco;              // Physical frame number (-1 if not in memory)
+    time_t ultimo_tiempo_uso;   // Last access time (for LRU algorithm)
+    bool en_memoria;            // Present bit (1 = in memory, 0 = in swap)
+    bool modificado;            // Dirty bit (1 = modified, 0 = clean)
+    int pid;                    // Process ID
+    int posicion_swap;          // Position in swap space
+    int num_pagina;             // Virtual page number
+} entrada_pagina;
+```
+
+### Page Table Management
+
+Each process has a list of page table entries:
+
+```c:memoria/src/main.c
+t_list* lista_tablas_de_procesos;  // List of page tables (one per process)
+t_list* paginas_en_memoria;        // List of pages currently in physical memory
+```
+
+### Process Initialization
+
+When a process is created, its page table is initialized:
+
+```c:memoria/src/main.c
+t_list* inicializar_proceso(pcb* proceso, t_list* bloques_reservados) {
+    int entradas_por_tabla = paginas_necesarias(proceso);
+    t_list* tabla_de_paginas = list_create();
+    
+    for (int i = 0; i < entradas_por_tabla; i++) {
+        entrada_pagina* pagina = malloc(sizeof(entrada_pagina));
+        pagina->num_marco = -1;              // Not in memory initially
+        pagina->modificado = 0;              // Not modified
+        pagina->en_memoria = 0;              // Not in physical memory
+        pagina->pid = proceso->pid;
+        pagina->num_pagina = i;
+        pagina->ultimo_tiempo_uso = NULL;
+        int *posSwap = list_get(bloques_reservados, i);
+        pagina->posicion_swap = *posSwap;    // Assign swap position
+        list_add(tabla_de_paginas, pagina);
+        free(posSwap);
+    }
+    
+    log_info(logger_memoria, "PID: %d - Tamaño: %d", proceso->pid, list_size(tabla_de_paginas));
+    return tabla_de_paginas;
+}
+```
+
+## Virtual to Physical Address Translation
+
+### Address Translation Process
+
+1. **Receive translation request** from CPU with PID and page number
+2. **Lookup page table** for the process
+3. **Check present bit** (en_memoria)
+4. **Return frame number** if present, or trigger page fault if not
+
+```c:memoria/src/main.c
+int obtener_nro_marco_memoria(int num_pagina, int pid_actual) {
+    for (int i = 0; i < list_size(lista_tablas_de_procesos); i++) {
+        t_list* tabla_pagina = list_get(lista_tablas_de_procesos, i);
+        entrada_pagina* entrada = list_get(tabla_pagina, 0);
+        
+        if (entrada->pid == pid_actual) {
+            entrada_pagina* pagina = list_get(tabla_pagina, num_pagina);
+            if (pagina->en_memoria == 1) {
+                log_info(logger_memoria, "PID: %d - Pagina: %d - Marco: %d", 
+                        pid_actual, num_pagina, pagina->num_marco);
+                return pagina->num_marco;
+            }
+        }
+    }
+    return -1;  // Page fault
+}
+```
+
+### Memory Access Operations
+
+**Read from memory:**
+
+```c:memoria/src/main.c
+uint32_t* leer_registro_de_memoria_uint(DireccionFisica direccion) {
+    uint32_t* leido = malloc(tam_pagina);
+    int marco_en_memoria = direccion.marco * tam_pagina;
+    
+    pthread_mutex_lock(&mx_memoria);
+    memcpy(leido, memoria + marco_en_memoria + direccion.desplazamiento, sizeof(uint32_t));
+    pthread_mutex_unlock(&mx_memoria);
+    
+    return leido;
+}
+```
+
+**Write to memory:**
+
+```c:memoria/src/main.c
+void escribir_marco_en_memoria(DireccionFisica direccion, uint32_t* valor) {
+    int marco_en_memoria = direccion.marco * tam_pagina;
+    
+    pthread_mutex_lock(&mx_memoria);
+    memcpy(memoria + marco_en_memoria + direccion.desplazamiento, valor, sizeof(uint32_t));
+    pthread_mutex_unlock(&mx_memoria);
+}
+```
+
+## Page Fault Handling
+
+### Page Fault Detection
+
+When the CPU requests a page that is not in memory, a page fault occurs:
+
+```c:memoria/src/main.c
+case PEDIDO_MARCO: {
+    int pid, numero_pagina;
+    recv_pedido_marco(cliente_socket, &pid, &numero_pagina);
+    int numeroMarco = obtener_nro_marco_memoria(numero_pagina, pid);
+    
+    if (numeroMarco >= 0) {
+        send_marco(cliente_socket, numeroMarco);  // Page in memory
+    } else {
+        // Page fault - notify CPU
+        t_paquete* paquetePageFault = crear_paquete(PCB_PAGEFAULT);
+        agregar_a_paquete(paquetePageFault, &numeroMarco, sizeof(int));
+        enviar_paquete(paquetePageFault, cliente_socket);
+        eliminar_paquete(paquetePageFault);
+    }
+    break;
+}
+```
+
+### Page Fault Resolution
+
+The complete page fault handler:
+
+```c:memoria/src/main.c
+int tratar_page_fault(int num_pagina, int pid_actual) {
+    t_list* tabla_de_proceso = buscar_tabla_pagina(pid_actual);
+    entrada_pagina* pagina = list_get(tabla_de_proceso, num_pagina);
+    
+    log_info(logger_memoria, "PAGE FAULT");
+    
+    // 1. Fetch page from swap
+    send_pedido_swap(conexion_memoria_filesystem, pagina->posicion_swap);
+    char *bloque_swap = recv_leido_swap(conexion_memoria_filesystem);
+    
+    // 2. Find free frame
+    int nro_marco = buscar_marco_libre();
+    
+    if (nro_marco == -1) {
+        // No free frames - use replacement algorithm
+        nro_marco = usar_algoritmo(pid_actual, num_pagina);
+    }
+    
+    // 3. Load page into frame
+    escribir_bloque_en_memoria(bloque_swap, nro_marco);
+    
+    // 4. Update page table entry
+    pagina->num_marco = nro_marco;
+    pagina->en_memoria = 1;
+    pagina->ultimo_tiempo_uso = time(NULL);
+    
+    // 5. Mark frame as occupied
+    pthread_mutex_lock(&mx_bitarray_marcos_ocupados);
+    bitarray_marcos_ocupados[nro_marco] = 1;
+    pthread_mutex_unlock(&mx_bitarray_marcos_ocupados);
+    
+    // 6. Add to list of pages in memory
+    list_add(paginas_en_memoria, pagina);
+    
+    free(bloque_swap);
+    return nro_marco;
+}
+```
+
+## Page Replacement Algorithms
+
+### Algorithm Selection
+
+```c:memoria/src/main.c
+int usar_algoritmo(int pid, int num_pagina) {
+    if (strcmp(algoritmo_reemplazo, "FIFO") == 0) {
+        return algoritmo_fifo(pid, num_pagina);
+    } else if (strcmp(algoritmo_reemplazo, "LRU") == 0) {
+        return algoritmo_lru(pid, num_pagina);
+    } else {
+        return -1;
+    }
+}
+```
+
+### FIFO (First-In-First-Out)
+
+Replaces the oldest page loaded into memory:
+
+```c:memoria/src/main.c
+int algoritmo_fifo(int pid, int num_pagina) {
+    if (list_is_empty(lista_tablas_de_procesos)) {
+        log_info(logger_memoria, "No hay páginas para reemplazar.");
+        return -1;
+    }
+    
+    // Remove first page from memory (oldest)
+    entrada_pagina* paginaReemplazo = list_remove(paginas_en_memoria, 0);
+    t_list* tabla_de_proceso = buscar_tabla_pagina(pid);
+    entrada_pagina* paginaEntrante = list_get(tabla_de_proceso, num_pagina);
+    
+    log_info(logger_memoria, "REEMPLAZO - Marco: %d - Page Out: %d - %d - Page In: %d - %d", 
+            paginaReemplazo->num_marco, paginaReemplazo->pid, paginaReemplazo->num_pagina, 
+            pid, paginaEntrante->num_pagina);
+    
+    // If page was modified, write back to swap
+    if (paginaReemplazo->modificado == 1) {
+        t_paquete* paquete = crear_paquete(ESCRIBIR_SWAP);
+        DireccionFisica direccion;
+        direccion.marco = paginaReemplazo->num_marco;
+        direccion.desplazamiento = 0;
+        
+        uint32_t* leido = leer_registro_de_memoria_uint(direccion);
+        char valorStr[tam_pagina];
+        sprintf(valorStr, "%u", *leido);
+        char* valorChar = malloc(tam_pagina);
+        strcpy(valorChar, valorStr);
+        
+        agregar_a_paquete(paquete, &paginaReemplazo->posicion_swap, tam_pagina);
+        agregar_a_paquete(paquete, valorChar, tam_pagina);
+        enviar_paquete(paquete, conexion_memoria_filesystem);
+        eliminar_paquete(paquete);
+        
+        free(valorChar);
+        free(leido);
+        paginaReemplazo->modificado = 0;
+    }
+    
+    // Update page table
+    paginaReemplazo->en_memoria = 0;
+    paginaEntrante->ultimo_tiempo_uso = time(NULL);
+    
+    return paginaReemplazo->num_marco;
+}
+```
+
+### LRU (Least Recently Used)
+
+Replaces the page that has not been used for the longest time:
+
+```c:memoria/src/main.c
+int algoritmo_lru(int pid, int num_pagina) {
+    if (list_is_empty(lista_tablas_de_procesos)) {
+        log_info(logger_memoria, "No hay páginas para reemplazar.");
+        return -1;
+    }
+    
+    // Sort pages by last use time
+    list_sort(paginas_en_memoria, (void*) compararTiempoUso);
+    
+    // Remove least recently used page (first after sorting)
+    entrada_pagina* paginaReemplazo = list_remove(paginas_en_memoria, 0);
+    t_list* tabla_de_proceso = buscar_tabla_pagina(pid);
+    entrada_pagina* paginaEntrante = list_get(tabla_de_proceso, num_pagina);
+    
+    log_info(logger_memoria, "REEMPLAZO - Marco: %d - Page Out: %d - %d - Page In: %d - %d", 
+            paginaReemplazo->num_marco, paginaReemplazo->pid, paginaReemplazo->num_pagina, 
+            pid, paginaEntrante->num_pagina);
+    
+    // Write back if modified (same as FIFO)
+    if (paginaReemplazo->modificado == 1) {
+        // ... (same write-back logic as FIFO)
+    }
+    
+    paginaReemplazo->en_memoria = 0;
+    paginaEntrante->ultimo_tiempo_uso = time(NULL);
+    
+    return paginaReemplazo->num_marco;
+}
+
+// Comparison function for LRU
+bool compararTiempoUso(void *unaPag, void *otraPag) { 
+    entrada_pagina* pa = unaPag;
+    entrada_pagina* pb = otraPag;
+    time_t tiempo1 = pa->ultimo_tiempo_uso;
+    time_t tiempo2 = pb->ultimo_tiempo_uso;
+    return tiempo1 < tiempo2;  // Ascending order (oldest first)
+}
+```
+
+### Dirty Page Handling
+
+Pages are marked as modified when written to:
+
+```c:memoria/src/main.c
+void marcar_pagina_modificada(int dirFisica) {
+    entrada_pagina* entrada = buscar_en_tabla_por_direccionfisica(dirFisica);
+    if (entrada == NULL) {
+        log_info(logger_memoria, "No se encontro la pagina");
+        return;
+    }
+    entrada->modificado = 1;
+}
+```
+
+## Process Termination
+
+When a process terminates, all its pages and swap space are freed:
+
+```c:memoria/src/main.c
+void terminar_proceso(int pid) {
+    // Free physical memory frames
+    eliminar_espacio_memoria(pid);
+    
+    // Get page table and swap positions
+    t_list* tabla = buscar_tabla_pagina(pid);
+    int cant = list_size(tabla);
+    int bloques_reservados[list_size(tabla)];
+    
+    for (int i = 0; i < list_size(tabla); i++) {
+        entrada_pagina* entrada = list_get(tabla, i);
+        bloques_reservados[i] = entrada->posicion_swap;
+    }
+    
+    // Remove page table
+    eliminar_tabla_paginas(pid);
+    
+    // Free swap space
+    send_liberacion_swap(conexion_memoria_filesystem, cant, bloques_reservados);
+}
+```
+
+## Thread Safety
+
+All memory operations use mutexes to ensure thread safety:
+
+```c:memoria/src/main.c
+pthread_mutex_t mx_memoria;                    // Protects physical memory
+pthread_mutex_t mx_bitarray_marcos_ocupados;   // Protects frame allocation bitmap
+pthread_mutex_t mx_paginas_en_memoria;         // Protects page list
+```
+
+## Performance Considerations
+
+1. **Access Delay**: Configurable `RETARDO_RESPUESTA` simulates memory access latency
+2. **Swap Communication**: Synchronous communication with filesystem for swap operations
+3. **Page Fault Overhead**: Includes swap I/O, potential page replacement, and page table updates
+4. **Algorithm Efficiency**: 
+   - FIFO: O(1) - constant time removal
+   - LRU: O(n log n) - requires sorting by timestamp
